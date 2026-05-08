@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -v -E '\\\\.\\(tex|pdf\\)$')",
+      "Bash(rm -f main.aux main.log main.out)"
+    ]
+  }
+}
