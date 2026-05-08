@@ -17,11 +17,15 @@
 of Activation-Based LLM Pruning}
 
 \author{%
-  Mingeon Kim \\
-  Graduate School of Semiconductor \\
-  Pohang University of Science and Technology (POSTECH) \\
-  Pohang, Republic of Korea \\
-  \texttt{[your email]@postech.ac.kr}
+  Minguhn Kim \\
+  Graduate School of Semiconductor Technology \\
+  POSTECH \\
+  \texttt{minguhn@postech.ac.kr} \\
+  \And
+  Jihun Park \\
+  Graduate School of Convergence Science and Technology \\
+  POSTECH \\
+  \texttt{jpark42@postech.ac.kr}
 }
 
 \begin{document}
@@ -29,20 +33,25 @@ of Activation-Based LLM Pruning}
 \maketitle
 
 \begin{abstract}
-We present a systematic stress-test of Wanda~\cite{wanda}, a simple and effective
-pruning method for large language models (LLMs) that scores weights by the
-product of their magnitude and the $\ell_2$-norm of corresponding input
-activations. While the original paper demonstrates strong results on LLaMA
-model families, several aspects of its generalizability remain untested.
-In this work, we evaluate Wanda under four axes of perturbation:
-(1) different model architectures beyond LLaMA,
-(2) different calibration datasets,
-(3) varying sparsity ratios,
-and (4) additional evaluation metrics beyond perplexity.
-We also document reproducibility issues encountered when running the
-original codebase under modern library versions.
-Our findings reveal that Wanda's performance degrades non-trivially under
-certain conditions, and we provide an analysis of the failure modes.
+We present a systematic stress-test of Wanda~\cite{wanda}, a simple and
+effective pruning method for large language models (LLMs) that scores weights
+by the product of their magnitude and the $\ell_2$-norm of corresponding
+input activations. The original paper claims robustness to the choice of
+calibration data, but tests this only by varying the \emph{quantity} of
+English C4 samples---never the \emph{domain} or \emph{language}. We argue
+that the activation norm $\|X_j\|_2$ is a statistical fingerprint of the
+calibration distribution, and that domain-mismatched calibration can make
+Wanda perform \emph{worse} than the calibration-free magnitude pruning
+baseline on capabilities not represented in the calibration data.
+We test this thesis on LLaMA across three experiments:
+(1) calibration domain shift at 50\% sparsity using English (C4),
+Korean (MC4-ko), code (The Stack), and random-token calibrations;
+(2) per-task fragility curves across 50\%, 60\%, and 70\% sparsity;
+and (3) the calibration $\times$ sparsity interaction at 70\% sparsity.
+We additionally document reproducibility issues encountered when running
+the original codebase under modern library versions, and provide an
+English-only domain-shift supplement on LLaMA-2-7B to isolate the
+cross-lingual component of the effect.
 \end{abstract}
 
 % =============================================================
@@ -63,21 +72,31 @@ over a small calibration set. Weights with the lowest scores are pruned.
 This requires no gradient computation and runs in minutes even for
 65B-parameter models, making it highly practical.
 
-However, the original evaluation is conducted exclusively on LLaMA model
-families~\cite{llama} using WikiText-2 perplexity as the primary metric,
-with calibration data drawn from 128 samples of the C4 dataset~\cite{c4}.
-This leaves open several questions:
+However, the original evaluation tests calibration-data robustness only by
+varying the \emph{quantity} of C4~\cite{c4} samples in a single domain
+(English web text). This leaves a sharper question untested: \emph{can
+domain-mismatched calibration actively harm Wanda's pruning quality, to the
+point of being worse than calibration-free magnitude pruning?}
+We focus on this single thesis through three experiments:
 
 \begin{itemize}
-  \item Does the activation-based scoring generalize to architectures
-        with different attention mechanisms or activation functions?
-  \item How sensitive is pruning quality to the choice of calibration data?
-  \item At what sparsity level does performance degrade sharply?
-  \item Does perplexity improvement translate to downstream task performance?
+  \item \textbf{Calibration domain shift.} At 50\% sparsity, does using
+        English, Korean, code, or random-token calibration affect which
+        capabilities (English knowledge, math reasoning, Korean language)
+        survive pruning?
+  \item \textbf{Per-task fragility curves.} As sparsity increases from 50\%
+        to 70\%, do different downstream tasks degrade at different
+        thresholds, and does perplexity track them?
+  \item \textbf{Calibration $\times$ sparsity interaction.} At the
+        most aggressive setting, do calibration-domain damage and
+        sparsity-cliff damage compound super-additively, suggesting
+        both effects target the same low-activation features?
 \end{itemize}
 
-This work addresses these questions through a systematic stress-test of Wanda,
-following the Track 2 protocol of reproducing and then breaking the method.
+Following the Track 2 stress-testing protocol, we first reproduce the
+original codebase (and document the reproducibility issues encountered),
+then run the three experiments above on LLaMA, with a LLaMA-2-7B
+English-only supplement to isolate the cross-lingual component.
 
 % =============================================================
 \section{Background}
@@ -150,131 +169,240 @@ running CUDA 12.6, PyTorch 2.6.0, and transformers 5.5.3.
 
 \subsection{Models}
 
-We evaluate on the following model families:
 \begin{itemize}
-  \item \textbf{OPT}~\cite{opt}: 125M, 1.3B, 6.7B
-  \item \textbf{LLaMA-2}~\cite{llama}: 7B, 13B (original paper's setting)
+  \item \textbf{LLaMA-3-8B}~\cite{llama}: main model. Chosen because it
+        scores above random chance on Korean benchmarks (KMMLU, KoBEST),
+        which is required to measure Korean-capability loss after pruning.
+  \item \textbf{LLaMA-2-7B}~\cite{llama}: supplementary model for the
+        English-only domain-shift control (Section~\ref{sec:exp4}).
 \end{itemize}
 
 \subsection{Calibration Datasets}
 
+We use 128 samples per source, matching the original Wanda setup:
 \begin{itemize}
-  \item \textbf{C4} (default): English web text; 128 samples.
-  \item \textbf{WikiText-2}: Encyclopedia-style text.
-  \item \textbf{The Pile -- Code}: Programming language corpus.
+  \item \textbf{C4}~\cite{c4} (default): English web text.
+  \item \textbf{MC4-ko}: Korean subset of the multilingual C4.
+  \item \textbf{The Stack}: source-code corpus (a non-natural-language domain).
+  \item \textbf{Random tokens}: tokens sampled uniformly from the vocabulary;
+        a structureless control.
 \end{itemize}
 
 \subsection{Evaluation Metrics}
 
+All metrics are computed with the \texttt{lm-evaluation-harness} framework
+where applicable.
 \begin{itemize}
-  \item \textbf{Perplexity} on WikiText-2 and PTB (primary metric in original paper).
-  \item \textbf{Zero-shot accuracy} on WinoGrande, HellaSwag, and ARC-Easy
-        using the \texttt{lm-evaluation-harness} framework.
+  \item \textbf{WikiText-2 perplexity} ($\downarrow$): primary metric in
+        the original Wanda paper; English language-modeling fluency.
+  \item \textbf{MMLU} ($\uparrow$, 5-shot accuracy): English world-knowledge
+        and reasoning.
+  \item \textbf{GSM8K} ($\uparrow$, 8-shot accuracy): English mathematical
+        reasoning.
+  \item \textbf{KoBEST HellaSwag} ($\uparrow$, 0-shot accuracy): Korean
+        commonsense reasoning---the capability we expect to be most
+        sensitive to English-only calibration.
 \end{itemize}
 
 % =============================================================
 \section{Results}
 % =============================================================
 
-\subsection{Experiment 1: Different Model Architectures}
+\subsection{Experiment 1: Calibration Domain Shift at 50\% Sparsity}
+\label{sec:exp1}
+
+We hold model (LLaMA-3-8B) and sparsity (50\%, unstructured) fixed and vary
+the calibration source for Wanda, comparing against two anchor baselines
+that do not depend on calibration data the same way.
+Table~\ref{tab:exp1-calib-domain} reports six pruning runs.
 
 \begin{table}[h]
-  \caption{WikiText-2 perplexity ($\downarrow$) of Wanda at 50\% sparsity
-           across model families. \textbf{[TO BE FILLED WITH RESULTS]}}
-  \label{tab:arch}
+  \caption{Effect of calibration source on Wanda at 50\% unstructured
+           sparsity (LLaMA-3-8B). The activation norm $\|X_j\|_2$ is a
+           statistical fingerprint of the calibration distribution, so
+           we expect domain-mismatched calibration to disproportionately
+           damage capabilities not represented in that distribution.
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp1-calib-domain}
   \centering
-  \begin{tabular}{llccc}
-    \toprule
-    Model & Size & Dense & Magnitude & Wanda \\
-    \midrule
-    OPT   & 125M  & -- & -- & -- \\
-    OPT   & 1.3B  & -- & -- & -- \\
-    OPT   & 6.7B  & -- & -- & -- \\
-    LLaMA-2 & 7B  & -- & -- & -- \\
-    LLaMA-2 & 13B & -- & -- & -- \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\subsection{Experiment 2: Different Calibration Datasets}
-
-\begin{table}[h]
-  \caption{Effect of calibration dataset on WikiText-2 perplexity ($\downarrow$)
-           for OPT-1.3B at 50\% sparsity. \textbf{[TO BE FILLED WITH RESULTS]}}
-  \label{tab:calib}
-  \centering
-  \begin{tabular}{lc}
-    \toprule
-    Calibration Data & Perplexity \\
-    \midrule
-    C4 (default)   & -- \\
-    WikiText-2     & -- \\
-    Code (Pile)    & -- \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\subsection{Experiment 3: Varying Sparsity Ratios}
-
-\begin{table}[h]
-  \caption{WikiText-2 perplexity ($\downarrow$) of Wanda on OPT-1.3B
-           across sparsity ratios. \textbf{[TO BE FILLED WITH RESULTS]}}
-  \label{tab:sparsity}
-  \centering
-  \begin{tabular}{lccccc}
-    \toprule
-    Method & 10\% & 30\% & 50\% & 70\% & 90\% \\
-    \midrule
-    Dense     & \multicolumn{5}{c}{--} \\
-    Magnitude & -- & -- & -- & -- & -- \\
-    Wanda     & -- & -- & -- & -- & -- \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\subsection{Experiment 4: Downstream Task Evaluation}
-
-\begin{table}[h]
-  \caption{Zero-shot accuracy ($\uparrow$) on downstream benchmarks for
-           OPT-1.3B at 50\% sparsity. \textbf{[TO BE FILLED WITH RESULTS]}}
-  \label{tab:downstream}
-  \centering
+  \small
   \begin{tabular}{lcccc}
     \toprule
-    Method & WinoGrande & HellaSwag & ARC-Easy & Average \\
+    Method (calibration) & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & GSM8K $\uparrow$ & KoBEST HS $\uparrow$ \\
     \midrule
-    Dense     & -- & -- & -- & -- \\
-    Magnitude & -- & -- & -- & -- \\
-    Wanda     & -- & -- & -- & -- \\
+    Dense (no pruning)         & -- & -- & -- & -- \\
+    \midrule
+    Magnitude (no calibration) & -- & -- & -- & -- \\
+    SparseGPT (C4)             & -- & -- & -- & -- \\
+    \midrule
+    Wanda (C4, English web)    & -- & -- & -- & -- \\
+    Wanda (MC4-ko, Korean)     & -- & -- & -- & -- \\
+    Wanda (The Stack, code)    & -- & -- & -- & -- \\
+    Wanda (random tokens)      & -- & -- & -- & -- \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+\subsection{Experiment 2: Per-Task Fragility Curves Across Sparsity}
+\label{sec:exp2}
+
+We hold calibration fixed (C4) and sweep sparsity at 50\%, 60\%, and 70\%.
+The 50\% row for each method is shared with Table~\ref{tab:exp1-calib-domain},
+so this table contributes six \emph{new} pruning runs.
+The goal is to identify whether different downstream tasks cliff-drop at
+different sparsity thresholds, and whether perplexity tracks those drops.
+
+\begin{table}[h]
+  \caption{Per-task fragility under increasing sparsity, LLaMA-3-8B with
+           C4 calibration where applicable. \textbf{[TO BE FILLED]}}
+  \label{tab:exp2-sparsity-curves}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Method & Sparsity & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & GSM8K $\uparrow$ & KoBEST HS $\uparrow$ \\
+    \midrule
+    Dense                & 0\%   & -- & -- & -- & -- \\
+    \midrule
+    Magnitude            & 50\%  & -- & -- & -- & -- \\
+    Magnitude            & 60\%  & -- & -- & -- & -- \\
+    Magnitude            & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    SparseGPT (C4)       & 50\%  & -- & -- & -- & -- \\
+    SparseGPT (C4)       & 60\%  & -- & -- & -- & -- \\
+    SparseGPT (C4)       & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    Wanda (C4)           & 50\%  & -- & -- & -- & -- \\
+    Wanda (C4)           & 60\%  & -- & -- & -- & -- \\
+    Wanda (C4)           & 70\%  & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 3: Calibration $\times$ Sparsity Interaction}
+\label{sec:exp3}
+
+We test the extreme corner of the design space: English-calibrated and
+Korean-calibrated Wanda, both at 50\% and 70\% sparsity. Three of the four
+cells are reused from Tables~\ref{tab:exp1-calib-domain} and
+\ref{tab:exp2-sparsity-curves}; only \emph{Wanda (MC4-ko) at 70\%} is a new
+run. If the Korean-capability loss from English calibration and from high
+sparsity compound super-additively on KoBEST HellaSwag, this would suggest
+both effects target the same low-activation Korean features.
+
+\begin{table}[h]
+  \caption{Compound effect of calibration mismatch and high sparsity on
+           Wanda (LLaMA-3-8B). $\Delta$ columns report drop relative to
+           the dense baseline (filled after results are available).
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp3-calib-x-sparsity}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Calibration & Sparsity & MMLU $\uparrow$ & $\Delta$MMLU & KoBEST HS $\uparrow$ & $\Delta$KoBEST \\
+    \midrule
+    -- (Dense)         & 0\%   & -- & 0 & -- & 0 \\
+    \midrule
+    C4 (English)       & 50\%  & -- & -- & -- & -- \\
+    C4 (English)       & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    MC4-ko (Korean)    & 50\%  & -- & -- & -- & -- \\
+    MC4-ko (Korean)    & 70\%  & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 4 (Supplement): English-Only Domain Shift on LLaMA-2-7B}
+\label{sec:exp4}
+
+To isolate the cross-lingual component of Experiment 1, we run a parallel
+domain-shift study on LLaMA-2-7B---which has limited Korean capability---using
+only English-domain calibrations. If within-English domain shift (web text
+vs.\ code vs.\ random tokens) produces \emph{less} damage than the
+cross-lingual shift in Experiment 1, that supports the thesis that the
+language axis dominates the domain axis for Wanda.
+
+\begin{table}[h]
+  \caption{English-only domain shift on LLaMA-2-7B. All evaluations are on
+           English benchmarks; Magnitude and SparseGPT are reported only at
+           the two corner sparsities for compute reasons.
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp4-en-only}
+  \centering
+  \small
+  \begin{tabular}{llccc}
+    \toprule
+    Method (calibration)  & Sparsity & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & ARC-c $\uparrow$ \\
+    \midrule
+    Dense                 & 0\%  & -- & -- & -- \\
+    \midrule
+    Magnitude             & 50\% & -- & -- & -- \\
+    Magnitude             & 70\% & -- & -- & -- \\
+    SparseGPT (C4)        & 50\% & -- & -- & -- \\
+    SparseGPT (C4)        & 70\% & -- & -- & -- \\
+    \midrule
+    Wanda (C4, web)       & 50\% & -- & -- & -- \\
+    Wanda (C4, web)       & 60\% & -- & -- & -- \\
+    Wanda (C4, web)       & 70\% & -- & -- & -- \\
+    Wanda (The Stack)     & 50\% & -- & -- & -- \\
+    Wanda (The Stack)     & 60\% & -- & -- & -- \\
+    Wanda (The Stack)     & 70\% & -- & -- & -- \\
+    Wanda (random tokens) & 50\% & -- & -- & -- \\
+    Wanda (random tokens) & 60\% & -- & -- & -- \\
+    Wanda (random tokens) & 70\% & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Run accounting.}
+Tables \ref{tab:exp1-calib-domain}--\ref{tab:exp4-en-only} together cover
+$6 + 6 + 1 + 13 = 26$ distinct pruning runs; the dense rows do not count as
+pruning runs. Cells reused across tables (e.g., Wanda(C4) at 50\% in both
+Tables~\ref{tab:exp1-calib-domain} and \ref{tab:exp2-sparsity-curves}) are
+counted once.
 
 % =============================================================
 \section{Analysis}
 % =============================================================
 
-\subsection{Architecture Sensitivity}
+\subsection{Calibration Domain Sensitivity}
 
 \textbf{[To be written after experiments.]}
-We hypothesize that Wanda's effectiveness depends on the statistical
-properties of activations in each architecture. LLaMA uses SwiGLU activations,
-which produce sparser activation patterns than OPT's ReLU, potentially making
-Wanda's activation-based scoring more discriminative for LLaMA.
+We hypothesize that English-calibrated Wanda will damage Korean capabilities
+(KoBEST HellaSwag) more than Korean-calibrated Wanda damages English
+capabilities (MMLU, GSM8K), because Korean text naturally contains some
+English tokens but English text contains essentially no Korean. The decisive
+prediction is that English-calibrated Wanda on KoBEST HellaSwag falls
+\emph{at or below} the calibration-free magnitude pruning baseline---if so,
+calibration data has been actively counterproductive.
 
-\subsection{Calibration Data Sensitivity}
-
-\textbf{[To be written after experiments.]}
-We expect that domain mismatch between calibration data and evaluation data
-will lead to degraded pruning quality, as activation statistics will not
-reflect the true importance of weights for the target distribution.
-
-\subsection{Sparsity Cliff}
+\subsection{Sparsity Cliff and Per-Task Fragility}
 
 \textbf{[To be written after experiments.]}
-We expect a sharp performance degradation at high sparsity ratios ($>$70\%),
-as the number of remaining weights becomes insufficient to maintain the
-model's representational capacity.
+We expect WikiText-2 perplexity to degrade approximately continuously,
+while downstream tasks cliff-drop at distinct thresholds---likely GSM8K and
+KoBEST HellaSwag before MMLU. This would imply that perplexity is a poor
+proxy for downstream capability retention under aggressive pruning.
+
+\subsection{Calibration $\times$ Sparsity Interaction}
+
+\textbf{[To be written after experiments.]}
+If the Korean-capability loss from English calibration (Experiment 1) and
+from high sparsity (Experiment 2) compound super-additively at 70\% sparsity
+on KoBEST HellaSwag, this would suggest both effects damage the same set of
+low-activation Korean-specific features, rather than two independent failure
+modes.
+
+\subsection{Cross-Lingual vs.\ Within-English Domain Shift}
+
+\textbf{[To be written after experiments.]}
+The LLaMA-2-7B supplement (Section~\ref{sec:exp4}) lets us compare the
+within-English domain shift (web text $\rightarrow$ code $\rightarrow$ random
+tokens) against the cross-lingual shift (English $\rightarrow$ Korean) from
+Experiment 1. We expect the cross-lingual shift to produce strictly more
+damage on the affected language's benchmarks, since dormant features are
+fully missed rather than merely under-weighted.
 
 % =============================================================
 \section{Limitations}
