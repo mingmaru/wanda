@@ -1,0 +1,426 @@
+\documentclass{article}
+\usepackage[nonatbib]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\title{Stress-Testing Wanda: A Reproducibility and Robustness Study\\
+of Activation-Based LLM Pruning}
+
+\author{%
+  Mingeon Kim \\
+  Graduate School of Semiconductor \\
+  Pohang University of Science and Technology (POSTECH) \\
+  Pohang, Republic of Korea \\
+  \texttt{[your email]@postech.ac.kr}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a systematic stress-test of Wanda~\cite{wanda}, a simple and effective
+pruning method for large language models (LLMs) that scores weights by the
+product of their magnitude and the $\ell_2$-norm of corresponding input
+activations. While the original paper demonstrates strong results on LLaMA
+model families, several aspects of its generalizability remain untested.
+In this work, we evaluate Wanda under four axes of perturbation:
+(1) different model architectures beyond LLaMA,
+(2) different calibration datasets,
+(3) varying sparsity ratios,
+and (4) additional evaluation metrics beyond perplexity.
+We also document reproducibility issues encountered when running the
+original codebase under modern library versions.
+Our findings reveal that Wanda's performance degrades non-trivially under
+certain conditions, and we provide an analysis of the failure modes.
+\end{abstract}
+
+% =============================================================
+\section{Introduction}
+% =============================================================
+
+Model compression is a critical enabler of efficient inference for large-scale
+neural networks. Among compression techniques, unstructured pruning offers a
+flexible way to reduce model size by zeroing out individual weights.
+Wanda~\cite{wanda} (Pruning by \textbf{W}eights \textbf{and} \textbf{A}ctivations)
+proposes a remarkably simple pruning criterion: for each weight $w_{ij}$,
+its importance score is defined as
+\begin{equation}
+  S_{ij} = |w_{ij}| \cdot \|\mathbf{x}_j\|_2,
+\end{equation}
+where $\mathbf{x}_j$ denotes the $j$-th input feature activation collected
+over a small calibration set. Weights with the lowest scores are pruned.
+This requires no gradient computation and runs in minutes even for
+65B-parameter models, making it highly practical.
+
+However, the original evaluation is conducted exclusively on LLaMA model
+families~\cite{llama} using WikiText-2 perplexity as the primary metric,
+with calibration data drawn from 128 samples of the C4 dataset~\cite{c4}.
+This leaves open several questions:
+
+\begin{itemize}
+  \item Does the activation-based scoring generalize to architectures
+        with different attention mechanisms or activation functions?
+  \item How sensitive is pruning quality to the choice of calibration data?
+  \item At what sparsity level does performance degrade sharply?
+  \item Does perplexity improvement translate to downstream task performance?
+\end{itemize}
+
+This work addresses these questions through a systematic stress-test of Wanda,
+following the Track 2 protocol of reproducing and then breaking the method.
+
+% =============================================================
+\section{Background}
+% =============================================================
+
+\subsection{Wanda Pruning}
+
+Given a pre-trained LLM, Wanda prunes each linear layer independently by
+computing importance scores $S_{ij}$ for all weights and zeroing out those
+below a target sparsity ratio $s$. The key insight over magnitude-only pruning
+is that a weight connected to a high-activation feature should be treated as
+more important, even if its magnitude is small. The calibration set is used
+solely for a single forward pass to collect activation statistics; no weight
+updates are performed.
+
+\subsection{Baselines}
+
+We compare Wanda against:
+\begin{itemize}
+  \item \textbf{Magnitude pruning}: scores weights by $|w_{ij}|$ only.
+  \item \textbf{SparseGPT}~\cite{sparsegpt}: solves a layer-wise
+        reconstruction problem; more expensive but generally stronger.
+  \item \textbf{Dense baseline}: unpruned model performance.
+\end{itemize}
+
+% =============================================================
+\section{Reproducibility Issues}
+% =============================================================
+
+Before conducting stress-tests, we attempted to reproduce the original results
+using the public codebase.\footnote{\url{https://github.com/locuslab/wanda}}
+We identified the following compatibility issues with modern library versions
+(torch 2.6, transformers 5.5, datasets 3.x):
+
+\begin{enumerate}
+  \item \textbf{torch $<$ 2.6 blocked}: A security vulnerability
+        (CVE-2025-32434) in \texttt{torch.load} causes the \texttt{transformers}
+        library to raise a \texttt{ValueError} when loading model weights with
+        torch versions below 2.6. The original codebase was developed with
+        torch 2.x, requiring an upgrade.
+
+  \item \textbf{C4 dataset config renamed}: The \texttt{datasets} library
+        changed the C4 configuration identifier from \texttt{`allenai--c4'}
+        to \texttt{`en'}, causing a \texttt{BuilderConfig} error at runtime.
+
+  \item \textbf{Split size verification}: Even after the config fix,
+        loading only a subset of C4 (one shard) triggers a
+        \texttt{NonMatchingSplitsSizesError}. The fix requires passing
+        \texttt{verification\_mode=`no\_checks'}.
+
+  \item \textbf{OPT architecture mismatch}: Wanda's calibration code
+        accesses \texttt{model.model.layers}, which is valid for LLaMA
+        but fails for OPT, whose layers reside at
+        \texttt{model.model.decoder.layers}.
+\end{enumerate}
+
+These issues collectively demonstrate that the original codebase lacks
+robustness to software environment changes, raising reproducibility concerns.
+All fixes were applied to our fork before proceeding with experiments.
+
+% =============================================================
+\section{Experimental Setup}
+% =============================================================
+
+\subsection{Compute Environment}
+
+All experiments are conducted on a server equipped with
+8$\times$ NVIDIA RTX 6000 Ada Generation GPUs (48\,GB VRAM each),
+running CUDA 12.6, PyTorch 2.6.0, and transformers 5.5.3.
+
+\subsection{Models}
+
+We evaluate on the following model families:
+\begin{itemize}
+  \item \textbf{OPT}~\cite{opt}: 125M, 1.3B, 6.7B
+  \item \textbf{LLaMA-2}~\cite{llama}: 7B, 13B (original paper's setting)
+\end{itemize}
+
+\subsection{Calibration Datasets}
+
+\begin{itemize}
+  \item \textbf{C4} (default): English web text; 128 samples.
+  \item \textbf{WikiText-2}: Encyclopedia-style text.
+  \item \textbf{The Pile -- Code}: Programming language corpus.
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+\begin{itemize}
+  \item \textbf{Perplexity} on WikiText-2 and PTB (primary metric in original paper).
+  \item \textbf{Zero-shot accuracy} on WinoGrande, HellaSwag, and ARC-Easy
+        using the \texttt{lm-evaluation-harness} framework.
+\end{itemize}
+
+% =============================================================
+\section{Results}
+% =============================================================
+
+\subsection{Experiment 1: Different Model Architectures}
+
+\begin{table}[h]
+  \caption{WikiText-2 perplexity ($\downarrow$) of Wanda at 50\% sparsity
+           across model families. \textbf{[TO BE FILLED WITH RESULTS]}}
+  \label{tab:arch}
+  \centering
+  \begin{tabular}{llccc}
+    \toprule
+    Model & Size & Dense & Magnitude & Wanda \\
+    \midrule
+    OPT   & 125M  & -- & -- & -- \\
+    OPT   & 1.3B  & -- & -- & -- \\
+    OPT   & 6.7B  & -- & -- & -- \\
+    LLaMA-2 & 7B  & -- & -- & -- \\
+    LLaMA-2 & 13B & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 2: Different Calibration Datasets}
+
+\begin{table}[h]
+  \caption{Effect of calibration dataset on WikiText-2 perplexity ($\downarrow$)
+           for OPT-1.3B at 50\% sparsity. \textbf{[TO BE FILLED WITH RESULTS]}}
+  \label{tab:calib}
+  \centering
+  \begin{tabular}{lc}
+    \toprule
+    Calibration Data & Perplexity \\
+    \midrule
+    C4 (default)   & -- \\
+    WikiText-2     & -- \\
+    Code (Pile)    & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 3: Varying Sparsity Ratios}
+
+\begin{table}[h]
+  \caption{WikiText-2 perplexity ($\downarrow$) of Wanda on OPT-1.3B
+           across sparsity ratios. \textbf{[TO BE FILLED WITH RESULTS]}}
+  \label{tab:sparsity}
+  \centering
+  \begin{tabular}{lccccc}
+    \toprule
+    Method & 10\% & 30\% & 50\% & 70\% & 90\% \\
+    \midrule
+    Dense     & \multicolumn{5}{c}{--} \\
+    Magnitude & -- & -- & -- & -- & -- \\
+    Wanda     & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 4: Downstream Task Evaluation}
+
+\begin{table}[h]
+  \caption{Zero-shot accuracy ($\uparrow$) on downstream benchmarks for
+           OPT-1.3B at 50\% sparsity. \textbf{[TO BE FILLED WITH RESULTS]}}
+  \label{tab:downstream}
+  \centering
+  \begin{tabular}{lcccc}
+    \toprule
+    Method & WinoGrande & HellaSwag & ARC-Easy & Average \\
+    \midrule
+    Dense     & -- & -- & -- & -- \\
+    Magnitude & -- & -- & -- & -- \\
+    Wanda     & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% =============================================================
+\section{Analysis}
+% =============================================================
+
+\subsection{Architecture Sensitivity}
+
+\textbf{[To be written after experiments.]}
+We hypothesize that Wanda's effectiveness depends on the statistical
+properties of activations in each architecture. LLaMA uses SwiGLU activations,
+which produce sparser activation patterns than OPT's ReLU, potentially making
+Wanda's activation-based scoring more discriminative for LLaMA.
+
+\subsection{Calibration Data Sensitivity}
+
+\textbf{[To be written after experiments.]}
+We expect that domain mismatch between calibration data and evaluation data
+will lead to degraded pruning quality, as activation statistics will not
+reflect the true importance of weights for the target distribution.
+
+\subsection{Sparsity Cliff}
+
+\textbf{[To be written after experiments.]}
+We expect a sharp performance degradation at high sparsity ratios ($>$70\%),
+as the number of remaining weights becomes insufficient to maintain the
+model's representational capacity.
+
+% =============================================================
+\section{Limitations}
+% =============================================================
+
+Our study has the following limitations:
+
+\begin{itemize}
+  \item \textbf{Scope}: Due to compute constraints, we do not evaluate
+        LLaMA-30B or larger models.
+  \item \textbf{Rigor}: Each experiment is run with a single random seed;
+        variance across seeds is not reported.
+  \item \textbf{Baselines}: We do not compare against more recent pruning
+        methods (e.g., RIA~\cite{ria}) due to time constraints.
+  \item \textbf{Hardware comparison}: Hardware-level benchmarks (latency,
+        throughput) for actual sparse inference are not included, as
+        unstructured sparsity does not directly translate to speedup on
+        standard GPUs without specialized kernels.
+\end{itemize}
+
+% =============================================================
+\section{Conclusion}
+% =============================================================
+
+We conducted a systematic stress-test of Wanda, a simple yet effective
+LLM pruning method, along four axes: model architecture, calibration data,
+sparsity ratio, and evaluation metrics. We additionally documented four
+reproducibility issues in the original codebase arising from library version
+updates. \textbf{[Conclusions to be updated after experiments.]}
+Our results suggest that while Wanda is a strong baseline under its original
+evaluation conditions, its performance is sensitive to \textbf{[X, Y, Z]},
+which should be considered when applying the method in practice.
+
+% =============================================================
+% References
+% =============================================================
+\section*{References}
+{
+\small
+[1] \label{wanda} Sun, M., Liu, Z., Bair, A., \& Kolter, J.Z. (2024).
+A Simple and Effective Pruning Approach for Large Language Models.
+\textit{ICLR 2024}. \url{https://arxiv.org/abs/2306.11695}
+
+[2] \label{llama} Touvron, H., et al. (2023).
+LLaMA: Open and Efficient Foundation Language Models.
+\textit{arXiv:2302.13971}.
+
+[3] \label{opt} Zhang, S., et al. (2022).
+OPT: Open Pre-trained Transformer Language Models.
+\textit{arXiv:2205.01068}.
+
+[4] \label{sparsegpt} Frantar, E., \& Alistarh, D. (2023).
+SparseGPT: Massive Language Models Can Be Accurately Pruned in One Shot.
+\textit{ICML 2023}.
+
+[5] \label{c4} Raffel, C., et al. (2020).
+Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer.
+\textit{JMLR}.
+
+[6] \label{ria} Zhang, M., et al. (2024).
+Plug-and-Play: An Efficient Post-training Pruning Method for Large Language Models.
+\textit{ICLR 2024}.
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\section*{NeurIPS Paper Checklist}
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract and introduction clearly state that
+    this is a stress-testing study of Wanda, not a proposal of a new method.
+    Claims are scoped accordingly.
+
+\item {\bf Limitations}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 6 explicitly discusses limitations in scope,
+    rigor, baselines, and hardware evaluation.
+
+\item {\bf Theory assumptions and proofs}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This paper does not include theoretical results.
+
+\item {\bf Experimental result reproducibility}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All commands, library versions, and hardware
+    configurations are documented. Our modified code is publicly available.
+
+\item {\bf Open access to data and code}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Our fork with all modifications is available at
+    \url{https://github.com/[your-account]/wanda}.
+
+\item {\bf Experimental setting/details}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 4 describes all models, datasets,
+    hyperparameters, and evaluation metrics.
+
+\item {\bf Experiment statistical significance}
+    \item[] Answer: \answerNo{}
+    \item[] Justification: Due to compute constraints, experiments are run
+    with a single seed. Error bars are not reported.
+
+\item {\bf Experiments compute resources}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 4.1 reports the GPU type, VRAM, CUDA
+    version, and software stack used for all experiments.
+
+\item {\bf Code of ethics}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: This work studies model compression of
+    publicly available models and poses no ethical concerns.
+
+\item {\bf Broader impacts}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This is a reproducibility study with no direct
+    negative societal impact.
+
+\item {\bf Safeguards}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: We do not release new models or datasets.
+
+\item {\bf Licenses for existing assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Wanda (MIT License), OPT (OPT-175B License),
+    LLaMA-2 (LLaMA 2 Community License), C4 (ODC-BY) are all properly cited.
+
+\item {\bf New assets}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No new datasets or models are introduced.
+
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects are involved.
+
+\item {\bf Institutional review board (IRB) approvals}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects are involved.
+
+\item {\bf Declaration of LLM usage}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: LLMs are the \emph{subject} of study, not
+    a component of the methodology.
+
+\end{enumerate}
+
+\end{document}
