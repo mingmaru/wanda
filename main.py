@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from importlib.metadata import version
 
 from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers
-from lib.eval import eval_ppl, eval_downstream
+from lib.eval import eval_ppl, eval_ppl_korean, eval_downstream
 
 print('torch', version('torch'))
 print('transformers', version('transformers'))
@@ -95,6 +95,10 @@ def main():
                              "'all' = union.")
     parser.add_argument("--eval_limit", type=int, default=None,
                         help="Limit number of examples per eval task (for fast debugging). Default: full eval.")
+    parser.add_argument("--eval_korean_ppl", action="store_true",
+                        help="Also compute perplexity on held-out MC4-ko text. "
+                             "Continuous, high-sensitivity Korean metric (more sensitive "
+                             "to weight-level changes than Korean MCQ tasks).")
     args = parser.parse_args()
 
     # Setting seeds for reproducibility
@@ -138,12 +142,18 @@ def main():
     ppl_test = eval_ppl(args, model, tokenizer, device)
     print(f"wikitext perplexity {ppl_test}")
 
+    ppl_korean = None
+    if args.eval_korean_ppl:
+        ppl_korean = eval_ppl_korean(args, model, tokenizer, device)
+        print(f"mc4-ko perplexity {ppl_korean}")
+
     if not os.path.exists(args.save):
         os.makedirs(args.save)
     save_filepath = os.path.join(args.save, f"log_{args.prune_method}.txt")
+    ppl_ko_str = f"{ppl_korean:.4f}" if ppl_korean is not None else "-"
     with open(save_filepath, "w") as f:
-        print("method\tactual_sparsity\tppl_test", file=f, flush=True)
-        print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
+        print("method\tactual_sparsity\tppl_test\tppl_korean", file=f, flush=True)
+        print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}\t{ppl_ko_str}", file=f, flush=True)
 
     if args.eval_zero_shot:
         task_configs = get_task_configs(args.eval_tasks)
