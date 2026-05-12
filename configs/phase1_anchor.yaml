@@ -1,0 +1,20 @@
+# Phase 1 anchor reproduction.
+#
+# predictions.md section 6: LLaMA-2-7B + C4 + 50% Wanda must reproduce
+# Wanda paper's WikiText-2 ppl ~6.42 (+- 0.2) and 7-task NLU avg ~62%
+# (+- 2pp) across three seeds before Phase 3 is allowed to start.
+
+name: phase1_anchor
+defaults:
+  model: meta-llama/Llama-2-7b-hf
+  prune_method: wanda
+  calib_data: c4
+  sparsity_ratio: 0.5
+  sparsity_type: unstructured
+  nsamples: 128
+  eval_zero_shot: true
+  eval_tasks: wanda_nlu
+
+runs:
+  - seeds: [0, 1, 2]
+    save_template: out/phase1_anchor/seed{seed}/
