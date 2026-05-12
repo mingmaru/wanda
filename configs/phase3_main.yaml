@@ -16,6 +16,14 @@ defaults:
   eval_korean_ppl: true
 
 runs:
+  # ---- Dense baseline (no pruning; one run is enough since model
+  #      forward pass is deterministic at sparsity=0). ----
+  - prune_method: wanda  # arbitrary; pruning is skipped at sparsity 0
+    calib_data: c4
+    sparsity_ratio: 0.0
+    seed: 0
+    save_template: out/phase3/dense/
+
   # ---- Headline cells (5 seeds) ----
   - calib_data: c4
     sparsity_ratio: 0.5
