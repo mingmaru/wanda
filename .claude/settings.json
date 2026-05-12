@@ -2,7 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(grep -v -E '\\\\.\\(tex|pdf\\)$')",
-      "Bash(rm -f main.aux main.log main.out)"
+      "Bash(rm -f main.aux main.log main.out)",
+      "Bash(nvidia-smi --query-gpu=name,memory.free,memory.total --format=csv)",
+      "Bash(python -c \"import torch, transformers, accelerate; print\\(f'torch:{torch.__version__}  transformers:{transformers.__version__}  accelerate:{accelerate.__version__}  cuda_available:{torch.cuda.is_available\\(\\)}  n_gpu:{torch.cuda.device_count\\(\\)}'\\)\")",
+      "Bash(huggingface-cli whoami *)",
+      "Bash(mkdir -p out/smoke)",
+      "Bash(python main.py --model meta-llama/Llama-2-7b-hf --prune_method wanda --sparsity_ratio 0.5 --sparsity_type unstructured --nsamples 16 --save out/smoke/)",
+      "Bash(conda info *)",
+      "Read(//home/ming/.cache/huggingface/hub/**)",
+      "Bash(python -m pip install \"transformers==4.45.2\")",
+      "Bash(mkdir -p out/smoke_llama3)",
+      "Bash(python main.py --model meta-llama/Meta-Llama-3-8B --prune_method wanda --sparsity_ratio 0.5 --sparsity_type unstructured --nsamples 16 --save out/smoke_llama3/)"
     ]
   }
 }

@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from importlib.metadata import version
 
 from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers
-from lib.eval import eval_ppl, eval_zero_shot
+from lib.eval import eval_ppl, eval_downstream
 
 print('torch', version('torch'))
 print('transformers', version('transformers'))
@@ -30,6 +30,9 @@ def main():
     parser.add_argument('--model', type=str, help='LLaMA model')
     parser.add_argument('--seed', type=int, default=0, help='Seed for sampling the calibration data.')
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
+    parser.add_argument('--calib_data', type=str, default='c4',
+                        choices=['c4', 'mc4_ko', 'the_stack', 'random'],
+                        help='Calibration dataset source.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
     parser.add_argument("--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"])
     parser.add_argument("--prune_method", type=str, choices=["magnitude", "wanda", "sparsegpt", 
@@ -39,7 +42,10 @@ def main():
     parser.add_argument('--save', type=str, default=None, help='Path to save results.')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
 
-    parser.add_argument("--eval_zero_shot", action="store_true")
+    parser.add_argument("--eval_zero_shot", action="store_true",
+                        help="Run downstream eval: MMLU (5-shot), GSM8K (8-shot), KoBEST HellaSwag (0-shot).")
+    parser.add_argument("--eval_limit", type=int, default=None,
+                        help="Limit number of examples per eval task (for fast debugging). Default: full eval.")
     args = parser.parse_args()
 
     # Setting seeds for reproducibility
@@ -91,16 +97,25 @@ def main():
         print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
 
     if args.eval_zero_shot:
-        accelerate=False
-        if "30b" in args.model or "65b" in args.model or "70b" in args.model:
-            accelerate=True
-
-        task_list = ["boolq", "rte","hellaswag","winogrande", "arc_easy","arc_challenge", "openbookqa"]
-        num_shot = 0
-        results = eval_zero_shot(args.model, model, tokenizer, task_list, num_shot, accelerate)
+        # Proposal's downstream eval triplet: English knowledge, math reasoning, Korean language.
+        task_configs = [
+            ("mmlu", 5),
+            ("gsm8k", 8),
+            ("kobest_hellaswag", 0),
+        ]
+        results = eval_downstream(model, tokenizer, task_configs, limit=args.eval_limit)
         print("********************************")
-        print("zero_shot evaluation results")
+        print("downstream evaluation results")
         print(results)
+
+        # Append to the existing log file alongside perplexity.
+        with open(save_filepath, "a") as f:
+            print("\ntask\tnum_fewshot\tmetric\tvalue", file=f, flush=True)
+            for _, task_results in results.items():
+                for inner_task, metrics in task_results.items():
+                    for metric, value in metrics.items():
+                        if isinstance(value, (int, float)):
+                            print(f"{inner_task}\t-\t{metric}\t{value:.4f}", file=f, flush=True)
 
     if args.save_model:
         model.save_pretrained(args.save_model)
