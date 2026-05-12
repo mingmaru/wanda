@@ -129,37 +129,41 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     return ppl.item()
 
 
-def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
-        num_fewshot=0, use_accelerate=False, add_special_tokens=False):
-    from lm_eval import tasks, evaluator 
-    def pattern_match(patterns, source_list):
-        task_names = set()
-        for pattern in patterns:
-            for matching in fnmatch.filter(source_list, pattern):
-                task_names.add(matching)
-        return list(task_names)
-    task_names = pattern_match(task_list, tasks.ALL_TASKS)
-    model_args = f"pretrained={model_name},cache_dir=./llm_weights"
-    limit = None 
-    if "70b" in model_name or "65b" in model_name:
-        limit = 2000
-    if use_accelerate:
-        model_args = f"pretrained={model_name},cache_dir=./llm_weights,use_accelerate=True"
-    results = evaluator.simple_evaluate(
-        model="hf-causal-experimental",
-        model_args=model_args,
-        tasks=task_names,
-        num_fewshot=num_fewshot,
-        batch_size=None,
-        device=None,
-        no_cache=True,
-        limit=limit,
-        description_dict={},
-        decontamination_ngrams_path=None,
-        check_integrity=False,
-        pretrained_model=model,
-        tokenizer=tokenizer, 
-        add_special_tokens=add_special_tokens
-    )
+# Run downstream evaluation using lm-evaluation-harness v0.4+ API.
+# task_configs is a list of (task_name, num_fewshot) tuples so each task
+# can use its canonical few-shot setting (e.g. MMLU 5-shot, GSM8K 8-shot,
+# KoBEST HellaSwag 0-shot).
+def eval_downstream(model, tokenizer, task_configs, batch_size="auto", limit=None):
+    from lm_eval import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
 
-    return results 
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+
+    all_results = {}
+    for task_name, num_fewshot in task_configs:
+        print(f"\n=== Evaluating {task_name} ({num_fewshot}-shot) ===")
+        out = simple_evaluate(
+            model=lm,
+            tasks=[task_name],
+            num_fewshot=num_fewshot,
+            batch_size=batch_size,
+            limit=limit,
+        )
+        all_results[task_name] = out["results"]
+    return all_results
+
+
+# Backwards-compatible wrapper for the old eval_zero_shot signature.
+# Defaults to the proposal's three downstream tasks at their canonical few-shot
+# counts. The model_name argument is ignored (the in-memory model is used).
+def eval_zero_shot(model_name, model, tokenizer, task_list=None, num_fewshot=0,
+                   use_accelerate=False, add_special_tokens=False):
+    if task_list is None:
+        task_configs = [
+            ("mmlu", 5),
+            ("gsm8k", 8),
+            ("kobest_hellaswag", 0),
+        ]
+    else:
+        task_configs = [(t, num_fewshot) for t in task_list]
+    return eval_downstream(model, tokenizer, task_configs)
