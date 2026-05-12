@@ -15,15 +15,58 @@ print('# of gpus: ', torch.cuda.device_count())
 
 def get_llm(model_name, cache_dir="llm_weights"):
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, 
-        torch_dtype=torch.float16, 
-        cache_dir=cache_dir, 
-        low_cpu_mem_usage=True, 
+        model_name,
+        torch_dtype=torch.float16,
+        cache_dir=cache_dir,
+        low_cpu_mem_usage=True,
         device_map="auto"
     )
 
-    model.seqlen = model.config.max_position_embeddings 
+    model.seqlen = model.config.max_position_embeddings
     return model
+
+# Eval task sets. Each entry is (task_name, num_fewshot); names must match
+# lm-eval-harness v0.4+ task registry.
+EVAL_TASK_SETS = {
+    # Phase 3 main experiment: English knowledge, math, two Korean benchmarks.
+    # KMMLU is the second Korean benchmark so the headline Korean result
+    # does not rest on KoBEST-HellaSwag alone.
+    "headline": [
+        ("mmlu", 5),
+        ("gsm8k", 8),
+        ("kobest_hellaswag", 0),
+        ("kmmlu", 5),
+    ],
+    # Phase 1 anchor reproduction: the Wanda paper's Table 8 7-task NLU bundle,
+    # all 0-shot. Reproducing these numbers ties our results to the literature.
+    "wanda_nlu": [
+        ("boolq", 0),
+        ("rte", 0),
+        ("hellaswag", 0),
+        ("winogrande", 0),
+        ("arc_easy", 0),
+        ("arc_challenge", 0),
+        ("openbookqa", 0),
+    ],
+}
+
+
+def get_task_configs(eval_tasks):
+    """Resolve --eval_tasks to a list of (task, num_fewshot) tuples.
+
+    'all' unions every named set, deduplicating by task name (first occurrence wins).
+    """
+    if eval_tasks == "all":
+        seen = set()
+        merged = []
+        for tasks in EVAL_TASK_SETS.values():
+            for t, n in tasks:
+                if t not in seen:
+                    seen.add(t)
+                    merged.append((t, n))
+        return merged
+    return EVAL_TASK_SETS[eval_tasks]
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -43,7 +86,13 @@ def main():
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
 
     parser.add_argument("--eval_zero_shot", action="store_true",
-                        help="Run downstream eval: MMLU (5-shot), GSM8K (8-shot), KoBEST HellaSwag (0-shot).")
+                        help="Run downstream eval (task bundle selected by --eval_tasks).")
+    parser.add_argument("--eval_tasks", type=str, default="headline",
+                        choices=list(EVAL_TASK_SETS.keys()) + ["all"],
+                        help="Which task bundle to run when --eval_zero_shot is set. "
+                             "'headline' = MMLU/GSM8K/KoBEST-HS/KMMLU (Phase 3 main). "
+                             "'wanda_nlu' = the Wanda paper's 7-task NLU bundle (Phase 1 anchor). "
+                             "'all' = union.")
     parser.add_argument("--eval_limit", type=int, default=None,
                         help="Limit number of examples per eval task (for fast debugging). Default: full eval.")
     args = parser.parse_args()
@@ -97,12 +146,9 @@ def main():
         print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
 
     if args.eval_zero_shot:
-        # Proposal's downstream eval triplet: English knowledge, math reasoning, Korean language.
-        task_configs = [
-            ("mmlu", 5),
-            ("gsm8k", 8),
-            ("kobest_hellaswag", 0),
-        ]
+        task_configs = get_task_configs(args.eval_tasks)
+        print(f"running eval task set '{args.eval_tasks}': "
+              f"{[(t, n) for t, n in task_configs]}")
         results = eval_downstream(model, tokenizer, task_configs, limit=args.eval_limit)
         print("********************************")
         print("downstream evaluation results")
