@@ -20,13 +20,29 @@ def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0")):
 
     # Get the test loader
     _, testloader = get_loaders(
-        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer 
+        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer
     )
 
     # Evaluate ppl in no grad context to avoid updating the model
     with torch.no_grad():
         ppl_test = eval_ppl_wikitext(model, testloader, 1, device)
-    return ppl_test 
+    return ppl_test
+
+
+# Perplexity on held-out MC4-ko text. Parallels eval_ppl (WikiText-2) but on
+# Korean. Continuous metric and large effective sample size at the token
+# level -- meaningfully more sensitive to weight-level changes than Korean
+# MCQ tasks (KoBEST-HS, KMMLU) where logit-magnitude shifts must cross the
+# option-margin to register.
+def eval_ppl_korean(args, model, tokenizer, device=torch.device("cuda:0")):
+    dataset = "mc4_ko_test"
+    print(f"evaluating perplexity on {dataset}")
+    _, testenc = get_loaders(
+        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer
+    )
+    with torch.no_grad():
+        ppl = eval_ppl_wikitext(model, testenc, 1, device)
+    return ppl
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
 def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):

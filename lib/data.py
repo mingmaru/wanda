@@ -129,6 +129,27 @@ def get_the_stack(nsamples, seed, seqlen, tokenizer):
     return trainloader, None
 
 
+# Held-out Korean text for perplexity evaluation.
+# Uses a different shard than get_mc4_ko (which loads shard 00000), so the
+# test text is disjoint from any calibration draw. Returns (None, testenc)
+# where testenc has the same TokenizerWrapper.input_ids interface that
+# eval_ppl_wikitext expects.
+def get_mc4_ko_test(nsamples, seed, seqlen, tokenizer):
+    valdata = load_dataset(
+        'allenai/c4', 'multilingual',
+        data_files={'validation': 'multilingual/c4-ko.tfrecord-00001-of-01024.json.gz'},
+        split='validation',
+        verification_mode='no_checks',
+    )
+    # Tokenize a single concatenated blob and truncate to 256 * seqlen tokens.
+    # Matches the get_c4 valenc construction so eval_ppl_wikitext can chunk it
+    # the same way it chunks WikiText-2.
+    valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
+    valenc = valenc.input_ids[:, :(256 * seqlen)]
+    valenc = TokenizerWrapper(valenc)
+    return None, valenc
+
+
 # Generate random-token "calibration" — structureless control.
 # Uniformly samples token IDs from the model's vocabulary.
 def get_random(nsamples, seed, seqlen, tokenizer):
@@ -152,6 +173,8 @@ def get_loaders(name, nsamples=128, seed=0, seqlen=2048, tokenizer=None):
         return get_wikitext2(nsamples, seed, seqlen, tokenizer)
     if name == "mc4_ko" or name == "mc4-ko":
         return get_mc4_ko(nsamples, seed, seqlen, tokenizer)
+    if name == "mc4_ko_test":
+        return get_mc4_ko_test(nsamples, seed, seqlen, tokenizer)
     if name == "the_stack" or name == "stack":
         return get_the_stack(nsamples, seed, seqlen, tokenizer)
     if name == "random":
