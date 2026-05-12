@@ -1,12 +1,13 @@
-import time 
-import heapq 
-import torch 
-import torch.nn as nn 
-from .sparsegpt import SparseGPT 
+import os
+import time
+import heapq
+import torch
+import torch.nn as nn
+from .sparsegpt import SparseGPT
 from .layerwrapper import WrappedGPT
-from .data import get_loaders 
+from .data import get_loaders
 
-from .ablate import AblateGPT 
+from .ablate import AblateGPT
 
 def find_layers(module, layers=[nn.Linear], name=''):
     """
@@ -111,14 +112,15 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     return W_mask, cur_sparsity
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
-    layers = model.model.layers 
+    layers = model.model.layers
+    saved_masks = {}
 
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
 
         for name in subset:
-            W = subset[name].weight.data 
+            W = subset[name].weight.data
             W_metric = torch.abs(W)
             if prune_n != 0:
                 W_mask = (torch.zeros_like(W)==1)
@@ -131,10 +133,16 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
                 W_mask = (W_metric<=thresh)
 
             W[W_mask] = 0
+            saved_masks[f"layer{i:02d}.{name}"] = W_mask.detach().cpu()
+
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_magnitude.pt"))
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
-    use_cache = model.config.use_cache 
-    model.config.use_cache = False 
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    saved_masks = {}
 
     print("loading calibdation data")
     dataloader, _ = get_loaders(args.calib_data,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
@@ -208,12 +216,17 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                     indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
                     W_mask.scatter_(1, indices, True)
 
-            subset[name].weight.data[W_mask] = 0  ## set weights to zero 
+            subset[name].weight.data[W_mask] = 0  ## set weights to zero
+            saved_masks[f"layer{i:02d}.{name}"] = W_mask.detach().cpu()
 
         for j in range(args.nsamples):
             with torch.no_grad():
                 outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         inps, outs = outs, inps
+
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_wanda.pt"))
 
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
@@ -228,6 +241,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
+    saved_masks = {}
 
     if "model.embed_tokens" in model.hf_device_map:
         dev = model.hf_device_map["model.embed_tokens"]
@@ -295,14 +309,22 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 
             gpts[name].fasterprune(args.sparsity_ratio, prune_n=prune_n, prune_m=prune_m, percdamp=0.01, blocksize=128)
             gpts[name].free()
+            # Derive mask from post-pruning weights. SparseGPT zeros pruned
+            # entries inside fasterprune; spurious zeros in trained weights
+            # are extremely rare in fp16, so (W == 0) is an accurate mask.
+            saved_masks[f"layer{i:02d}.{name}"] = (subset[name].weight.data == 0).detach().cpu()
 
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
 
-        layers[i] = layer 
+        layers[i] = layer
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
+
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_sparsegpt.pt"))
 
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
