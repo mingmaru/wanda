@@ -100,20 +100,21 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     # Get input IDs
     testenc = testenc.input_ids
 
-    # Calculate number of samples
-    nsamples = testenc.numel() // model.seqlen
+    # nchunks here is the WikiText-2 test set chunked into seqlen-sized blocks;
+    # NOT the same as args.nsamples (calibration sample count).
+    nchunks = testenc.numel() // model.seqlen
 
     # List to store negative log likelihoods
     nlls = []
-    print(f"nsamples {nsamples}")
+    print(f"nchunks {nchunks}")
 
     # Loop through each batch
-    for i in range(0,nsamples,bs):
+    for i in range(0,nchunks,bs):
         if i % 50 == 0:
-            print(f"sample {i}")
+            print(f"chunk {i}")
 
         # Calculate end index
-        j = min(i+bs, nsamples)
+        j = min(i+bs, nchunks)
 
         # Prepare inputs and move to device
         inputs = testenc[:,(i * model.seqlen):(j * model.seqlen)].to(device)
@@ -137,7 +138,7 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
         nlls.append(neg_log_likelihood)
 
     # Compute perplexity
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    ppl = torch.exp(torch.stack(nlls).sum() / (nchunks * model.seqlen))
 
     # Empty CUDA cache to save memory
     torch.cuda.empty_cache()

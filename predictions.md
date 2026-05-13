@@ -158,7 +158,16 @@ LLaMA-2-7B, C4 calibration, 50% unstructured Wanda. Reproduction against the Wan
 
 ## 10. Amendment log
 
-*None yet. Future amendments must be dated and explain (a) what changed, (b) why the change is not motivated by data we've already seen.*
+### 2026-05-12 — pre-existing Phase 1 partial evidence (prior data, not retroactive)
+
+Note for the record: Minguhn ran `python main.py --model meta-llama/Llama-2-7b-hf --prune_method wanda --calib_data c4 --sparsity_ratio 0.5 --sparsity_type unstructured --save out/llama2_7b/unstructured/wanda/` on 2026-04-22 (well before this pre-registration was written) and obtained WikiText-2 ppl = **6.461933135986328**. This falls within the §6 predicted tolerance (6.3–6.8) for the LLaMA-2-7B + C4 + 50% Wanda anchor, against the paper's 6.42.
+
+This is **prior evidence**, not part of the formal Phase 1 run:
+- It was produced before the predictions were committed, but at a configuration that exactly matches the Phase 1 anchor cell.
+- It was a single-seed run with the pre-manifest codebase, so it has no `manifest.json`, no NLU bundle eval, and no Korean perplexity.
+- The formal Phase 1 anchor (`configs/phase1_anchor.yaml`, 3 seeds with `--eval_tasks wanda_nlu`) is still required to satisfy the §6 gate, both for the NLU bundle reproduction and for the format the aggregator consumes.
+
+The prior result strengthens our prior that the formal Phase 1 will pass, but does not substitute for it. No predictions are modified by this amendment.
 
 ---
 
