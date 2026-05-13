@@ -70,7 +70,7 @@ def get_task_configs(eval_tasks):
     return EVAL_TASK_SETS[eval_tasks]
 
 
-# Wanda paper Table 11 reports the simple average across these 7 tasks.
+# Wanda paper Table 2 reports the simple average across these 7 tasks.
 # Phase 1 anchor reproduction compares against this average; auto-computed
 # whenever the wanda_nlu bundle was run.
 NLU_BUNDLE_TASKS = [

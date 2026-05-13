@@ -116,7 +116,7 @@ LLaMA-2-7B, C4 calibration, 50% unstructured Wanda. Reproduction against the Wan
 | Metric | Predicted | Wanda paper reference | Tolerance |
 |---|---|---|---|
 | WikiText-2 ppl | 6.3–6.8 | 6.42 (Table 1) | ±0.2 |
-| 7-task NLU avg | 60–64% | ~62% (Table 11) | ±2pp |
+| 7-task NLU avg | 60–64% | ~56% (Table 2) | ±2pp |
 
 **Phase 1 gate:** If either metric falls outside tolerance across all three seeds, Phase 3 does NOT start until the discrepancy is explained (library version, dataset revision, eval harness mismatch, or code bug).
 
