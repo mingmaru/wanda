@@ -1,12 +1,13 @@
-import time 
-import heapq 
-import torch 
-import torch.nn as nn 
-from .sparsegpt import SparseGPT 
+import os
+import time
+import heapq
+import torch
+import torch.nn as nn
+from .sparsegpt import SparseGPT
 from .layerwrapper import WrappedGPT
-from .data import get_loaders 
+from .data import get_loaders
 
-from .ablate import AblateGPT 
+from .ablate import AblateGPT
 
 def find_layers(module, layers=[nn.Linear], name=''):
     """
@@ -55,19 +56,30 @@ def check_sparsity(model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
+def _move_kwargs_to_device(kwargs, dev):
+    moved = {}
+    for k, v in kwargs.items():
+        if torch.is_tensor(v):
+            moved[k] = v.to(dev)
+        elif isinstance(v, tuple) and all(torch.is_tensor(x) for x in v):
+            moved[k] = tuple(x.to(dev) for x in v)
+        else:
+            moved[k] = v
+    return moved
+
+
 def prepare_calibration_input(model, dataloader, device):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
 
-    # dev = model.hf_device_map["model.embed_tokens"]
     if "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((len(dataloader), model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
-    cache = {'i': 0, 'attention_mask': None, "position_ids": None}
+    cache = {'i': 0, 'kwargs': {}}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -76,23 +88,20 @@ def prepare_calibration_input(model, dataloader, device):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            cache['kwargs'] = kwargs
             raise ValueError
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
             model(batch[0].to(device))
         except ValueError:
-            pass 
+            pass
     layers[0] = layers[0].module
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
     model.config.use_cache = use_cache
 
-    return inps, outs, attention_mask, position_ids 
+    return inps, outs, cache['kwargs']
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
@@ -103,14 +112,15 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     return W_mask, cur_sparsity
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
-    layers = model.model.layers 
+    layers = model.model.layers
+    saved_masks = {}
 
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
 
         for name in subset:
-            W = subset[name].weight.data 
+            W = subset[name].weight.data
             W_metric = torch.abs(W)
             if prune_n != 0:
                 W_mask = (torch.zeros_like(W)==1)
@@ -123,16 +133,22 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
                 W_mask = (W_metric<=thresh)
 
             W[W_mask] = 0
+            saved_masks[f"layer{i:02d}.{name}"] = W_mask.detach().cpu()
+
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_magnitude.pt"))
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
-    use_cache = model.config.use_cache 
-    model.config.use_cache = False 
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    saved_masks = {}
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders(args.calib_data,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
-        inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
+        inps, outs, layer_kwargs = prepare_calibration_input(model, dataloader, device)
 
     layers = model.model.layers
     for i in range(len(layers)):
@@ -141,7 +157,8 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
         if f"model.layers.{i}" in model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
             dev = model.hf_device_map[f"model.layers.{i}"]
-            inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
+            inps, outs = inps.to(dev), outs.to(dev)
+            layer_kwargs = _move_kwargs_to_device(layer_kwargs, dev)
 
         wrapped_layers = {}
         for name in subset:
@@ -157,7 +174,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         for h in handles:
             h.remove()
 
@@ -199,14 +216,19 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                     indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
                     W_mask.scatter_(1, indices, True)
 
-            subset[name].weight.data[W_mask] = 0  ## set weights to zero 
+            subset[name].weight.data[W_mask] = 0  ## set weights to zero
+            saved_masks[f"layer{i:02d}.{name}"] = W_mask.detach().cpu()
 
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         inps, outs = outs, inps
 
-    model.config.use_cache = use_cache 
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_wanda.pt"))
+
+    model.config.use_cache = use_cache
     torch.cuda.empty_cache()
 
 
@@ -214,11 +236,12 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     ## SparseGPT code available at: https://github.com/IST-DASLab/sparsegpt/tree/f5c25005a61f96a0933ca2f95705a963585aafaa
     print('Starting ...')
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders(args.calib_data,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
+    saved_masks = {}
 
     if "model.embed_tokens" in model.hf_device_map:
         dev = model.hf_device_map["model.embed_tokens"]
@@ -227,7 +250,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     inps = torch.zeros(
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {'i': 0, 'attention_mask': None, "position_ids": None}
+    cache = {'i': 0, 'kwargs': {}}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -236,8 +259,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            cache['kwargs'] = kwargs
             raise ValueError
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
@@ -249,8 +271,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
+    layer_kwargs = cache['kwargs']
 
     print('Ready.')
 
@@ -259,7 +280,8 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
         if f"model.layers.{i}" in model.hf_device_map:
             dev = model.hf_device_map[f"model.layers.{i}"]
             print(f"layer {i} device {dev}")
-            inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
+            inps, outs = inps.to(dev), outs.to(dev)
+            layer_kwargs = _move_kwargs_to_device(layer_kwargs, dev)
 
         subset = find_layers(layer)
 
@@ -277,7 +299,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
             handles.append(subset[name].register_forward_hook(add_batch(name)))
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         for h in handles:
             h.remove()
 
@@ -287,14 +309,22 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 
             gpts[name].fasterprune(args.sparsity_ratio, prune_n=prune_n, prune_m=prune_m, percdamp=0.01, blocksize=128)
             gpts[name].free()
+            # Derive mask from post-pruning weights. SparseGPT zeros pruned
+            # entries inside fasterprune; spurious zeros in trained weights
+            # are extremely rare in fp16, so (W == 0) is an accurate mask.
+            saved_masks[f"layer{i:02d}.{name}"] = (subset[name].weight.data == 0).detach().cpu()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
 
-        layers[i] = layer 
+        layers[i] = layer
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
+
+    if getattr(args, "save", None):
+        os.makedirs(args.save, exist_ok=True)
+        torch.save(saved_masks, os.path.join(args.save, "masks_sparsegpt.pt"))
 
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
@@ -305,7 +335,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 def prune_ablate(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     ## SparseGPT code available at: https://github.com/IST-DASLab/sparsegpt/tree/f5c25005a61f96a0933ca2f95705a963585aafaa
     print('Starting ...')
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders(args.calib_data,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
