@@ -1,0 +1,554 @@
+\documentclass{article}
+\usepackage[nonatbib]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\title{Stress-Testing Wanda: A Reproducibility and Robustness Study\\
+of Activation-Based LLM Pruning}
+
+\author{%
+  Minguhn Kim \\
+  Graduate School of Semiconductor Technology \\
+  POSTECH \\
+  \texttt{minguhn@postech.ac.kr} \\
+  \And
+  Jihun Park \\
+  Graduate School of Convergence Science and Technology \\
+  POSTECH \\
+  \texttt{jpark42@postech.ac.kr}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a systematic stress-test of Wanda~\cite{wanda}, a simple and
+effective pruning method for large language models (LLMs) that scores weights
+by the product of their magnitude and the $\ell_2$-norm of corresponding
+input activations. The original paper claims robustness to the choice of
+calibration data, but tests this only by varying the \emph{quantity} of
+English C4 samples---never the \emph{domain} or \emph{language}. We argue
+that the activation norm $\|X_j\|_2$ is a statistical fingerprint of the
+calibration distribution, and that domain-mismatched calibration can make
+Wanda perform \emph{worse} than the calibration-free magnitude pruning
+baseline on capabilities not represented in the calibration data.
+We test this thesis on LLaMA across three experiments:
+(1) calibration domain shift at 50\% sparsity using English (C4),
+Korean (MC4-ko), code (The Stack), and random-token calibrations;
+(2) per-task fragility curves across 50\%, 60\%, and 70\% sparsity;
+and (3) the calibration $\times$ sparsity interaction at 70\% sparsity.
+We additionally document reproducibility issues encountered when running
+the original codebase under modern library versions, and provide an
+English-only domain-shift supplement on LLaMA-2-7B to isolate the
+cross-lingual component of the effect.
+\end{abstract}
+
+% =============================================================
+\section{Introduction}
+% =============================================================
+
+Model compression is a critical enabler of efficient inference for large-scale
+neural networks. Among compression techniques, unstructured pruning offers a
+flexible way to reduce model size by zeroing out individual weights.
+Wanda~\cite{wanda} (Pruning by \textbf{W}eights \textbf{and} \textbf{A}ctivations)
+proposes a remarkably simple pruning criterion: for each weight $w_{ij}$,
+its importance score is defined as
+\begin{equation}
+  S_{ij} = |w_{ij}| \cdot \|\mathbf{x}_j\|_2,
+\end{equation}
+where $\mathbf{x}_j$ denotes the $j$-th input feature activation collected
+over a small calibration set. Weights with the lowest scores are pruned.
+This requires no gradient computation and runs in minutes even for
+65B-parameter models, making it highly practical.
+
+However, the original evaluation tests calibration-data robustness only by
+varying the \emph{quantity} of C4~\cite{c4} samples in a single domain
+(English web text). This leaves a sharper question untested: \emph{can
+domain-mismatched calibration actively harm Wanda's pruning quality, to the
+point of being worse than calibration-free magnitude pruning?}
+We focus on this single thesis through three experiments:
+
+\begin{itemize}
+  \item \textbf{Calibration domain shift.} At 50\% sparsity, does using
+        English, Korean, code, or random-token calibration affect which
+        capabilities (English knowledge, math reasoning, Korean language)
+        survive pruning?
+  \item \textbf{Per-task fragility curves.} As sparsity increases from 50\%
+        to 70\%, do different downstream tasks degrade at different
+        thresholds, and does perplexity track them?
+  \item \textbf{Calibration $\times$ sparsity interaction.} At the
+        most aggressive setting, do calibration-domain damage and
+        sparsity-cliff damage compound super-additively, suggesting
+        both effects target the same low-activation features?
+\end{itemize}
+
+Following the Track 2 stress-testing protocol, we first reproduce the
+original codebase (and document the reproducibility issues encountered),
+then run the three experiments above on LLaMA, with a LLaMA-2-7B
+English-only supplement to isolate the cross-lingual component.
+
+% =============================================================
+\section{Background}
+% =============================================================
+
+\subsection{Wanda Pruning}
+
+Given a pre-trained LLM, Wanda prunes each linear layer independently by
+computing importance scores $S_{ij}$ for all weights and zeroing out those
+below a target sparsity ratio $s$. The key insight over magnitude-only pruning
+is that a weight connected to a high-activation feature should be treated as
+more important, even if its magnitude is small. The calibration set is used
+solely for a single forward pass to collect activation statistics; no weight
+updates are performed.
+
+\subsection{Baselines}
+
+We compare Wanda against:
+\begin{itemize}
+  \item \textbf{Magnitude pruning}: scores weights by $|w_{ij}|$ only.
+  \item \textbf{SparseGPT}~\cite{sparsegpt}: solves a layer-wise
+        reconstruction problem; more expensive but generally stronger.
+  \item \textbf{Dense baseline}: unpruned model performance.
+\end{itemize}
+
+% =============================================================
+\section{Reproducibility Issues}
+% =============================================================
+
+Before conducting stress-tests, we attempted to reproduce the original results
+using the public codebase.\footnote{\url{https://github.com/locuslab/wanda}}
+We identified the following compatibility issues with modern library versions
+(torch 2.6, transformers 5.5, datasets 3.x):
+
+\begin{enumerate}
+  \item \textbf{torch $<$ 2.6 blocked}: A security vulnerability
+        (CVE-2025-32434) in \texttt{torch.load} causes the \texttt{transformers}
+        library to raise a \texttt{ValueError} when loading model weights with
+        torch versions below 2.6. The original codebase was developed with
+        torch 2.x, requiring an upgrade.
+
+  \item \textbf{C4 dataset config renamed}: The \texttt{datasets} library
+        changed the C4 configuration identifier from \texttt{`allenai--c4'}
+        to \texttt{`en'}, causing a \texttt{BuilderConfig} error at runtime.
+
+  \item \textbf{Split size verification}: Even after the config fix,
+        loading only a subset of C4 (one shard) triggers a
+        \texttt{NonMatchingSplitsSizesError}. The fix requires passing
+        \texttt{verification\_mode=`no\_checks'}.
+
+  \item \textbf{OPT architecture mismatch}: Wanda's calibration code
+        accesses \texttt{model.model.layers}, which is valid for LLaMA
+        but fails for OPT, whose layers reside at
+        \texttt{model.model.decoder.layers}.
+\end{enumerate}
+
+These issues collectively demonstrate that the original codebase lacks
+robustness to software environment changes, raising reproducibility concerns.
+All fixes were applied to our fork before proceeding with experiments.
+
+% =============================================================
+\section{Experimental Setup}
+% =============================================================
+
+\subsection{Compute Environment}
+
+All experiments are conducted on a server equipped with
+8$\times$ NVIDIA RTX 6000 Ada Generation GPUs (48\,GB VRAM each),
+running CUDA 12.6, PyTorch 2.6.0, and transformers 5.5.3.
+
+\subsection{Models}
+
+\begin{itemize}
+  \item \textbf{LLaMA-3-8B}~\cite{llama}: main model. Chosen because it
+        scores above random chance on Korean benchmarks (KMMLU, KoBEST),
+        which is required to measure Korean-capability loss after pruning.
+  \item \textbf{LLaMA-2-7B}~\cite{llama}: supplementary model for the
+        English-only domain-shift control (Section~\ref{sec:exp4}).
+\end{itemize}
+
+\subsection{Calibration Datasets}
+
+We use 128 samples per source, matching the original Wanda setup:
+\begin{itemize}
+  \item \textbf{C4}~\cite{c4} (default): English web text.
+  \item \textbf{MC4-ko}: Korean subset of the multilingual C4.
+  \item \textbf{The Stack}: source-code corpus (a non-natural-language domain).
+  \item \textbf{Random tokens}: tokens sampled uniformly from the vocabulary;
+        a structureless control.
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+All metrics are computed with the \texttt{lm-evaluation-harness} framework
+where applicable.
+\begin{itemize}
+  \item \textbf{WikiText-2 perplexity} ($\downarrow$): primary metric in
+        the original Wanda paper; English language-modeling fluency.
+  \item \textbf{MMLU} ($\uparrow$, 5-shot accuracy): English world-knowledge
+        and reasoning.
+  \item \textbf{GSM8K} ($\uparrow$, 8-shot accuracy): English mathematical
+        reasoning.
+  \item \textbf{KoBEST HellaSwag} ($\uparrow$, 0-shot accuracy): Korean
+        commonsense reasoning---the capability we expect to be most
+        sensitive to English-only calibration.
+\end{itemize}
+
+% =============================================================
+\section{Results}
+% =============================================================
+
+\subsection{Experiment 1: Calibration Domain Shift at 50\% Sparsity}
+\label{sec:exp1}
+
+We hold model (LLaMA-3-8B) and sparsity (50\%, unstructured) fixed and vary
+the calibration source for Wanda, comparing against two anchor baselines
+that do not depend on calibration data the same way.
+Table~\ref{tab:exp1-calib-domain} reports six pruning runs.
+
+\begin{table}[h]
+  \caption{Effect of calibration source on Wanda at 50\% unstructured
+           sparsity (LLaMA-3-8B). The activation norm $\|X_j\|_2$ is a
+           statistical fingerprint of the calibration distribution, so
+           we expect domain-mismatched calibration to disproportionately
+           damage capabilities not represented in that distribution.
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp1-calib-domain}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Method (calibration) & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & GSM8K $\uparrow$ & KoBEST HS $\uparrow$ \\
+    \midrule
+    Dense (no pruning)         & -- & -- & -- & -- \\
+    \midrule
+    Magnitude (no calibration) & -- & -- & -- & -- \\
+    SparseGPT (C4)             & -- & -- & -- & -- \\
+    \midrule
+    Wanda (C4, English web)    & -- & -- & -- & -- \\
+    Wanda (MC4-ko, Korean)     & -- & -- & -- & -- \\
+    Wanda (The Stack, code)    & -- & -- & -- & -- \\
+    Wanda (random tokens)      & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 2: Per-Task Fragility Curves Across Sparsity}
+\label{sec:exp2}
+
+We hold calibration fixed (C4) and sweep sparsity at 50\%, 60\%, and 70\%.
+The 50\% row for each method is shared with Table~\ref{tab:exp1-calib-domain},
+so this table contributes six \emph{new} pruning runs.
+The goal is to identify whether different downstream tasks cliff-drop at
+different sparsity thresholds, and whether perplexity tracks those drops.
+
+\begin{table}[h]
+  \caption{Per-task fragility under increasing sparsity, LLaMA-3-8B with
+           C4 calibration where applicable. \textbf{[TO BE FILLED]}}
+  \label{tab:exp2-sparsity-curves}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Method & Sparsity & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & GSM8K $\uparrow$ & KoBEST HS $\uparrow$ \\
+    \midrule
+    Dense                & 0\%   & -- & -- & -- & -- \\
+    \midrule
+    Magnitude            & 50\%  & -- & -- & -- & -- \\
+    Magnitude            & 60\%  & -- & -- & -- & -- \\
+    Magnitude            & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    SparseGPT (C4)       & 50\%  & -- & -- & -- & -- \\
+    SparseGPT (C4)       & 60\%  & -- & -- & -- & -- \\
+    SparseGPT (C4)       & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    Wanda (C4)           & 50\%  & -- & -- & -- & -- \\
+    Wanda (C4)           & 60\%  & -- & -- & -- & -- \\
+    Wanda (C4)           & 70\%  & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 3: Calibration $\times$ Sparsity Interaction}
+\label{sec:exp3}
+
+We test the extreme corner of the design space: English-calibrated and
+Korean-calibrated Wanda, both at 50\% and 70\% sparsity. Three of the four
+cells are reused from Tables~\ref{tab:exp1-calib-domain} and
+\ref{tab:exp2-sparsity-curves}; only \emph{Wanda (MC4-ko) at 70\%} is a new
+run. If the Korean-capability loss from English calibration and from high
+sparsity compound super-additively on KoBEST HellaSwag, this would suggest
+both effects target the same low-activation Korean features.
+
+\begin{table}[h]
+  \caption{Compound effect of calibration mismatch and high sparsity on
+           Wanda (LLaMA-3-8B). $\Delta$ columns report drop relative to
+           the dense baseline (filled after results are available).
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp3-calib-x-sparsity}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Calibration & Sparsity & MMLU $\uparrow$ & $\Delta$MMLU & KoBEST HS $\uparrow$ & $\Delta$KoBEST \\
+    \midrule
+    -- (Dense)         & 0\%   & -- & 0 & -- & 0 \\
+    \midrule
+    C4 (English)       & 50\%  & -- & -- & -- & -- \\
+    C4 (English)       & 70\%  & -- & -- & -- & -- \\
+    \midrule
+    MC4-ko (Korean)    & 50\%  & -- & -- & -- & -- \\
+    MC4-ko (Korean)    & 70\%  & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Experiment 4 (Supplement): English-Only Domain Shift on LLaMA-2-7B}
+\label{sec:exp4}
+
+To isolate the cross-lingual component of Experiment 1, we run a parallel
+domain-shift study on LLaMA-2-7B---which has limited Korean capability---using
+only English-domain calibrations. If within-English domain shift (web text
+vs.\ code vs.\ random tokens) produces \emph{less} damage than the
+cross-lingual shift in Experiment 1, that supports the thesis that the
+language axis dominates the domain axis for Wanda.
+
+\begin{table}[h]
+  \caption{English-only domain shift on LLaMA-2-7B. All evaluations are on
+           English benchmarks; Magnitude and SparseGPT are reported only at
+           the two corner sparsities for compute reasons.
+           \textbf{[TO BE FILLED]}}
+  \label{tab:exp4-en-only}
+  \centering
+  \small
+  \begin{tabular}{llccc}
+    \toprule
+    Method (calibration)  & Sparsity & WT-2 ppl $\downarrow$ & MMLU $\uparrow$ & ARC-c $\uparrow$ \\
+    \midrule
+    Dense                 & 0\%  & -- & -- & -- \\
+    \midrule
+    Magnitude             & 50\% & -- & -- & -- \\
+    Magnitude             & 70\% & -- & -- & -- \\
+    SparseGPT (C4)        & 50\% & -- & -- & -- \\
+    SparseGPT (C4)        & 70\% & -- & -- & -- \\
+    \midrule
+    Wanda (C4, web)       & 50\% & -- & -- & -- \\
+    Wanda (C4, web)       & 60\% & -- & -- & -- \\
+    Wanda (C4, web)       & 70\% & -- & -- & -- \\
+    Wanda (The Stack)     & 50\% & -- & -- & -- \\
+    Wanda (The Stack)     & 60\% & -- & -- & -- \\
+    Wanda (The Stack)     & 70\% & -- & -- & -- \\
+    Wanda (random tokens) & 50\% & -- & -- & -- \\
+    Wanda (random tokens) & 60\% & -- & -- & -- \\
+    Wanda (random tokens) & 70\% & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Run accounting.}
+Tables \ref{tab:exp1-calib-domain}--\ref{tab:exp4-en-only} together cover
+$6 + 6 + 1 + 13 = 26$ distinct pruning runs; the dense rows do not count as
+pruning runs. Cells reused across tables (e.g., Wanda(C4) at 50\% in both
+Tables~\ref{tab:exp1-calib-domain} and \ref{tab:exp2-sparsity-curves}) are
+counted once.
+
+% =============================================================
+\section{Analysis}
+% =============================================================
+
+\subsection{Calibration Domain Sensitivity}
+
+\textbf{[To be written after experiments.]}
+We hypothesize that English-calibrated Wanda will damage Korean capabilities
+(KoBEST HellaSwag) more than Korean-calibrated Wanda damages English
+capabilities (MMLU, GSM8K), because Korean text naturally contains some
+English tokens but English text contains essentially no Korean. The decisive
+prediction is that English-calibrated Wanda on KoBEST HellaSwag falls
+\emph{at or below} the calibration-free magnitude pruning baseline---if so,
+calibration data has been actively counterproductive.
+
+\subsection{Sparsity Cliff and Per-Task Fragility}
+
+\textbf{[To be written after experiments.]}
+We expect WikiText-2 perplexity to degrade approximately continuously,
+while downstream tasks cliff-drop at distinct thresholds---likely GSM8K and
+KoBEST HellaSwag before MMLU. This would imply that perplexity is a poor
+proxy for downstream capability retention under aggressive pruning.
+
+\subsection{Calibration $\times$ Sparsity Interaction}
+
+\textbf{[To be written after experiments.]}
+If the Korean-capability loss from English calibration (Experiment 1) and
+from high sparsity (Experiment 2) compound super-additively at 70\% sparsity
+on KoBEST HellaSwag, this would suggest both effects damage the same set of
+low-activation Korean-specific features, rather than two independent failure
+modes.
+
+\subsection{Cross-Lingual vs.\ Within-English Domain Shift}
+
+\textbf{[To be written after experiments.]}
+The LLaMA-2-7B supplement (Section~\ref{sec:exp4}) lets us compare the
+within-English domain shift (web text $\rightarrow$ code $\rightarrow$ random
+tokens) against the cross-lingual shift (English $\rightarrow$ Korean) from
+Experiment 1. We expect the cross-lingual shift to produce strictly more
+damage on the affected language's benchmarks, since dormant features are
+fully missed rather than merely under-weighted.
+
+% =============================================================
+\section{Limitations}
+% =============================================================
+
+Our study has the following limitations:
+
+\begin{itemize}
+  \item \textbf{Scope}: Due to compute constraints, we do not evaluate
+        LLaMA-30B or larger models.
+  \item \textbf{Rigor}: Each experiment is run with a single random seed;
+        variance across seeds is not reported.
+  \item \textbf{Baselines}: We do not compare against more recent pruning
+        methods (e.g., RIA~\cite{ria}) due to time constraints.
+  \item \textbf{Hardware comparison}: Hardware-level benchmarks (latency,
+        throughput) for actual sparse inference are not included, as
+        unstructured sparsity does not directly translate to speedup on
+        standard GPUs without specialized kernels.
+\end{itemize}
+
+% =============================================================
+\section{Conclusion}
+% =============================================================
+
+We conducted a systematic stress-test of Wanda, a simple yet effective
+LLM pruning method, along four axes: model architecture, calibration data,
+sparsity ratio, and evaluation metrics. We additionally documented four
+reproducibility issues in the original codebase arising from library version
+updates. \textbf{[Conclusions to be updated after experiments.]}
+Our results suggest that while Wanda is a strong baseline under its original
+evaluation conditions, its performance is sensitive to \textbf{[X, Y, Z]},
+which should be considered when applying the method in practice.
+
+% =============================================================
+% References
+% =============================================================
+\section*{References}
+{
+\small
+[1] \label{wanda} Sun, M., Liu, Z., Bair, A., \& Kolter, J.Z. (2024).
+A Simple and Effective Pruning Approach for Large Language Models.
+\textit{ICLR 2024}. \url{https://arxiv.org/abs/2306.11695}
+
+[2] \label{llama} Touvron, H., et al. (2023).
+LLaMA: Open and Efficient Foundation Language Models.
+\textit{arXiv:2302.13971}.
+
+[3] \label{opt} Zhang, S., et al. (2022).
+OPT: Open Pre-trained Transformer Language Models.
+\textit{arXiv:2205.01068}.
+
+[4] \label{sparsegpt} Frantar, E., \& Alistarh, D. (2023).
+SparseGPT: Massive Language Models Can Be Accurately Pruned in One Shot.
+\textit{ICML 2023}.
+
+[5] \label{c4} Raffel, C., et al. (2020).
+Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer.
+\textit{JMLR}.
+
+[6] \label{ria} Zhang, M., et al. (2024).
+Plug-and-Play: An Efficient Post-training Pruning Method for Large Language Models.
+\textit{ICLR 2024}.
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\section*{NeurIPS Paper Checklist}
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract and introduction clearly state that
+    this is a stress-testing study of Wanda, not a proposal of a new method.
+    Claims are scoped accordingly.
+
+\item {\bf Limitations}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 6 explicitly discusses limitations in scope,
+    rigor, baselines, and hardware evaluation.
+
+\item {\bf Theory assumptions and proofs}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This paper does not include theoretical results.
+
+\item {\bf Experimental result reproducibility}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All commands, library versions, and hardware
+    configurations are documented. Our modified code is publicly available.
+
+\item {\bf Open access to data and code}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Our fork with all modifications is available at
+    \url{https://github.com/[your-account]/wanda}.
+
+\item {\bf Experimental setting/details}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 4 describes all models, datasets,
+    hyperparameters, and evaluation metrics.
+
+\item {\bf Experiment statistical significance}
+    \item[] Answer: \answerNo{}
+    \item[] Justification: Due to compute constraints, experiments are run
+    with a single seed. Error bars are not reported.
+
+\item {\bf Experiments compute resources}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 4.1 reports the GPU type, VRAM, CUDA
+    version, and software stack used for all experiments.
+
+\item {\bf Code of ethics}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: This work studies model compression of
+    publicly available models and poses no ethical concerns.
+
+\item {\bf Broader impacts}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This is a reproducibility study with no direct
+    negative societal impact.
+
+\item {\bf Safeguards}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: We do not release new models or datasets.
+
+\item {\bf Licenses for existing assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Wanda (MIT License), OPT (OPT-175B License),
+    LLaMA-2 (LLaMA 2 Community License), C4 (ODC-BY) are all properly cited.
+
+\item {\bf New assets}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No new datasets or models are introduced.
+
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects are involved.
+
+\item {\bf Institutional review board (IRB) approvals}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects are involved.
+
+\item {\bf Declaration of LLM usage}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: LLMs are the \emph{subject} of study, not
+    a component of the methodology.
+
+\end{enumerate}
+
+\end{document}
