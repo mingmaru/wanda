@@ -13,6 +13,8 @@ defaults:
   eval_zero_shot: true
   eval_tasks: headline
   eval_korean_ppl: true
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 
 runs:
   # Magnitude pruning -- calibration-free, deterministic.

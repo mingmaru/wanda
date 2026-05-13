@@ -14,6 +14,12 @@ defaults:
   eval_zero_shot: true
   eval_tasks: headline
   eval_korean_ppl: true
+  # Default single-GPU mode. For the 8x A6000 machine, run with:
+  #   python orchestrator.py --config configs/phase3_main.yaml \
+  #     --max_parallel 8 --gpu_ids 0,1,2,3,4,5,6,7
+  # cuts wall time from ~32h sequential to ~4-5h.
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 
 runs:
   # ---- Dense baseline (no pruning; one run is enough since model

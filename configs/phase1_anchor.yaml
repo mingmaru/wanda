@@ -3,6 +3,17 @@
 # predictions.md section 6: LLaMA-2-7B + C4 + 50% Wanda must reproduce
 # Wanda paper's WikiText-2 ppl ~6.42 (+- 0.2) and 7-task NLU avg ~62%
 # (+- 2pp) across three seeds before Phase 3 is allowed to start.
+#
+# Prior evidence (predictions.md section 10 amendment 2026-05-12):
+# Minguhn's 2026-04-22 run at this exact configuration on the pre-manifest
+# codebase produced WikiText-2 ppl 6.461933135986328, well within tolerance.
+# This run is still required for three reasons:
+#   (1) NLU bundle eval: the prior run did not run --eval_tasks wanda_nlu,
+#       so the 7-task NLU average is unmeasured.
+#   (2) Manifest format: aggregate.py expects manifest.json per cell.
+#   (3) Seed variance: predictions.md sec 6 specifies 3 seeds, prior was 1.
+# Expected total wall time: ~3 hours (1 hour per seed, single-GPU sequential)
+# or ~1 hour with --max_parallel 3.
 
 name: phase1_anchor
 defaults:
@@ -14,6 +25,10 @@ defaults:
   nsamples: 128
   eval_zero_shot: true
   eval_tasks: wanda_nlu
+  # Default to single-GPU mode matching Minguhn's 2026-04-22 setup.
+  # Override via orchestrator --max_parallel / --gpu_ids for parallel runs.
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 
 runs:
   - seeds: [0, 1, 2]

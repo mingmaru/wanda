@@ -18,6 +18,8 @@ defaults:
   eval_zero_shot: true
   eval_tasks: headline
   eval_korean_ppl: true
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 
 runs:
   # ---- Exp 1: 50% sparsity, 4 calibrations + 2 reference baselines ----

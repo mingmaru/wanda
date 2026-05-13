@@ -22,6 +22,8 @@ defaults:
   nsamples: 128
   eval_zero_shot: true
   eval_tasks: wanda_nlu
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 
 runs:
   - prune_method: wanda
