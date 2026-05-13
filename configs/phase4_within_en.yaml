@@ -1,0 +1,41 @@
+# Phase 4: LLaMA-2-7B within-English domain-shift control.
+#
+# Tests whether Wanda is sensitive to ANY domain shift (web -> code on
+# LLaMA-2-7B, all English) or specifically to LANGUAGE shift (English ->
+# Korean on LLaMA-3-8B in Phase 3). Without Phase 4, the proposal's
+# cross-lingual-specificity claim has no control: any Korean degradation
+# could be 'Wanda is fragile to any OOD calibration' rather than 'Wanda
+# is fragile to language shift specifically'.
+#
+# predictions.md section 8 explicitly does NOT predict whether the
+# within-English effect will be smaller than the cross-lingual effect --
+# the comparison is the experimental question.
+#
+# 6 cells: Wanda x (C4, The Stack) x 3 seeds, all at 50% sparsity.
+# Magnitude reference is added for cross-reference with Phase 1 anchor.
+
+name: phase4_within_en
+defaults:
+  model: meta-llama/Llama-2-7b-hf
+  sparsity_type: unstructured
+  sparsity_ratio: 0.5
+  nsamples: 128
+  eval_zero_shot: true
+  eval_tasks: wanda_nlu
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
+
+runs:
+  - prune_method: wanda
+    calib_data: c4
+    seeds: [0, 1, 2]
+    save_template: out/phase4/wanda_c4_seed{seed}/
+  - prune_method: wanda
+    calib_data: the_stack
+    seeds: [0, 1, 2]
+    save_template: out/phase4/wanda_stack_seed{seed}/
+
+  # Magnitude reference (calibration-free; deterministic).
+  - prune_method: magnitude
+    seed: 0
+    save_template: out/phase4/magnitude/
