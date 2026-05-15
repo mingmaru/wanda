@@ -135,7 +135,7 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
             W[W_mask] = 0
             saved_masks[f"layer{i:02d}.{name}"] = W_mask.detach().cpu()
 
-    if getattr(args, "save", None):
+    if getattr(args, "save", None) and getattr(args, "save_masks", False):
         os.makedirs(args.save, exist_ok=True)
         torch.save(saved_masks, os.path.join(args.save, "masks_magnitude.pt"))
 
@@ -224,7 +224,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                 outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         inps, outs = outs, inps
 
-    if getattr(args, "save", None):
+    if getattr(args, "save", None) and getattr(args, "save_masks", False):
         os.makedirs(args.save, exist_ok=True)
         torch.save(saved_masks, os.path.join(args.save, "masks_wanda.pt"))
 
@@ -322,7 +322,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 
         inps, outs = outs, inps
 
-    if getattr(args, "save", None):
+    if getattr(args, "save", None) and getattr(args, "save_masks", False):
         os.makedirs(args.save, exist_ok=True)
         torch.save(saved_masks, os.path.join(args.save, "masks_sparsegpt.pt"))
 

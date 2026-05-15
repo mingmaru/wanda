@@ -30,9 +30,31 @@ def get_llm(model_name, cache_dir="llm_weights"):
 # Eval task sets. Each entry is (task_name, num_fewshot); names must match
 # lm-eval-harness v0.4+ task registry.
 EVAL_TASK_SETS = {
+    # Proposal-stated 3-task downstream eval (strict scope, no KMMLU/MC4-ko ppl).
+    # Use this bundle to stay aligned with the original Final Project Proposal.
+    "proposal": [
+        ("mmlu", 5),
+        ("gsm8k", 8),
+        ("kobest_hellaswag", 0),
+    ],
+    # Same as 'proposal' but skips GSM8K. GSM8K's chain-of-thought generation
+    # triggers CUDA kernel failures on Wanda/SparseGPT-pruned LLaMA-3-8B
+    # (numerical instability in SwiGLU MLP with 50%-zero weights). Use this
+    # bundle when GSM8K causes crashes; final report documents the exclusion.
+    "proposal_no_gsm8k": [
+        ("mmlu", 5),
+        ("kobest_hellaswag", 0),
+    ],
+    # KoBEST-only recovery bundle. MMLU's 56K loglikelihood requests also
+    # crashes Wanda-pruned LLaMA-3-8B (same CUDA instability as GSM8K).
+    # KoBEST has only ~2K requests so the smaller load avoids the crash.
+    # Use this for the 4 Wanda calibration variants whose MMLU runs failed.
+    "kobest_only": [
+        ("kobest_hellaswag", 0),
+    ],
     # Phase 3 main experiment: English knowledge, math, two Korean benchmarks.
     # KMMLU is the second Korean benchmark so the headline Korean result
-    # does not rest on KoBEST-HellaSwag alone.
+    # does not rest on KoBEST-HellaSwag alone. (Extended beyond proposal.)
     "headline": [
         ("mmlu", 5),
         ("gsm8k", 8),
@@ -175,6 +197,8 @@ def main():
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix")
     parser.add_argument('--save', type=str, default=None, help='Path to save results.')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
+    parser.add_argument('--save_masks', action='store_true',
+                        help='Save per-layer pruning masks (~6-8 GB per run as torch.bool). Default: off.')
 
     parser.add_argument("--eval_zero_shot", action="store_true",
                         help="Run downstream eval (task bundle selected by --eval_tasks).")
@@ -186,6 +210,9 @@ def main():
                              "'all' = union.")
     parser.add_argument("--eval_limit", type=int, default=None,
                         help="Limit number of examples per eval task (for fast debugging). Default: full eval.")
+    parser.add_argument("--eval_batch_size", type=str, default="auto",
+                        help="lm-eval-harness batch size: 'auto' (default), or an integer. "
+                             "Use '1' to work around CUDA kernel failures on pruned LLaMA-3-8B.")
     parser.add_argument("--override_shot", type=int, default=None,
                         help="If set, override the canonical num_fewshot for every task in "
                              "the selected bundle. e.g. --override_shot 0 forces 0-shot for "
@@ -259,7 +286,15 @@ def main():
             task_configs = [(t, args.override_shot) for t, _ in task_configs]
         print(f"running eval task set '{args.eval_tasks}': "
               f"{[(t, n) for t, n in task_configs]}")
-        downstream_results = eval_downstream(model, tokenizer, task_configs, limit=args.eval_limit)
+        # Convert "auto" string to keyword, integers to int.
+        bs = args.eval_batch_size
+        if bs != "auto":
+            try:
+                bs = int(bs)
+            except ValueError:
+                pass  # leave as string (e.g. "auto:1")
+        downstream_results = eval_downstream(model, tokenizer, task_configs,
+                                             batch_size=bs, limit=args.eval_limit)
         print("********************************")
         print("downstream evaluation results")
         print(downstream_results)

@@ -12,7 +12,12 @@
       "Read(//home/ming/.cache/huggingface/hub/**)",
       "Bash(python -m pip install \"transformers==4.45.2\")",
       "Bash(mkdir -p out/smoke_llama3)",
-      "Bash(python main.py --model meta-llama/Meta-Llama-3-8B --prune_method wanda --sparsity_ratio 0.5 --sparsity_type unstructured --nsamples 16 --save out/smoke_llama3/)"
+      "Bash(python main.py --model meta-llama/Meta-Llama-3-8B --prune_method wanda --sparsity_ratio 0.5 --sparsity_type unstructured --nsamples 16 --save out/smoke_llama3/)",
+      "Bash(chmod +x scripts/run_wanda_kobest_recovery.sh)",
+      "Bash(bash -n scripts/run_wanda_kobest_recovery.sh)",
+      "Bash(python -c ' *)",
+      "Bash(git stash *)",
+      "Bash(git branch *)"
     ]
   }
 }
