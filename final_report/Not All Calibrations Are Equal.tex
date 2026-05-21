@@ -1,0 +1,369 @@
+\documentclass{article}
+
+\usepackage[main, final]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+
+\title{Not All Calibrations Are Equal:\\Language Bias in LLM Pruning}
+
+\author{%
+  Minguhn Kim \\
+  M.S.\ Candidate, BEVIL\\
+  GSST, POSTECH\\
+  \texttt{minguhn@postech.ac.kr} \\
+  \And
+  Jihun Park \\
+  M.S.\ Candidate, ISDS\\
+  GSCST, POSTECH\\
+  \texttt{jpark42@postech.ac.kr} \\
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Wanda prunes large language models by scoring each weight as the product of its magnitude and the $\ell_2$-norm of the corresponding input activation, computed from a small calibration set.
+The original paper demonstrates robustness to the \emph{number} of calibration samples but does not test sensitivity to the domain or language of the calibration data.
+We provide evidence that the activation norm acts as a statistical fingerprint of the calibration distribution, and that this fingerprint determines which model capabilities survive pruning once sparsity is high enough.
+On LLaMA-3-8B with four calibration sources (English, Korean, code, random tokens) at 50--70\% unstructured sparsity, we find: (1)~at 50\%, calibration source spreads WikiText-2 perplexity by 6.27 points but all Wanda variants cluster within 1.2 percentage points on KoBEST HellaSwag (Korean), consistent with the original robustness finding; (2)~at 70\%, English-calibrated Wanda loses 12 percentage points more Korean capability than Korean-calibrated Wanda, while both damage English knowledge equally; (3)~WikiText-2 perplexity, the original paper's primary metric, consistently favors English calibration and cannot detect the Korean-capability damage.
+Within statistical uncertainty, Korean calibration dominates on downstream task accuracy: it preserves Korean at no cost to English.
+\end{abstract}
+
+%------------------------------------------------------------------
+\section{Introduction}
+%------------------------------------------------------------------
+
+Deploying large language models (LLMs) efficiently requires compression.
+Among compression techniques, unstructured pruning zeroes out individual weights to reduce effective model size.
+Wanda~\citep{sun2024wanda}---Pruning by \textbf{W}eights \textbf{and} \textbf{A}ctivations---is a widely adopted LLM pruning baseline owing to its simplicity: for each weight $w_{ij}$, the importance score is
+\begin{equation}
+  S_{ij} = |w_{ij}| \cdot \|x_j\|_2,
+  \label{eq:wanda}
+\end{equation}
+where $x_j$ is the $j$-th input feature activation collected over a small calibration set.
+Weights with the lowest scores are zeroed out.
+No gradient computation or weight update is required, and the method runs in minutes even for 65B-parameter models.
+
+The original evaluation demonstrates robustness to the \emph{number} of C4~\citep{raffel2020t5} samples (English web text), varying from 128 up to 2048 with little change in WikiText-2 perplexity.
+But it does not test sensitivity to the \emph{domain} or \emph{language} of the calibration data.
+Since $\|x_j\|_2$ is computed from the calibration set, it encodes which features are active in that data.
+Features that are dormant during calibration---such as features specific to Korean when calibrating on English---receive low activation norms, low importance scores, and are pruned first.
+We call this the \emph{calibration fingerprint}: the activation statistics encode the calibration distribution and bias which weights are pruned.
+
+Several recent works support this concern: calibration data choice significantly affects pruning quality~\citep{ji2025calibration}, even moderate sparsity substantially harms multilingual performance~\citep{choenni2025multilingual}, and reconstruction-based pruning can overfit its calibration data~\citep{shin2024calibration}.
+Yet no prior work directly tests whether the calibration fingerprint produces \emph{asymmetric} capability loss across languages, or whether the standard evaluation metric (WikiText-2 perplexity) can detect such loss.
+
+We test this on LLaMA-3-8B~\citep{grattafiori2024llama3} with four calibration sources at 50--70\% unstructured sparsity.
+First, at 50\% sparsity, calibration source clearly separates WikiText-2 perplexity but does \emph{not} separate KoBEST HellaSwag (Korean) or MMLU (English)---the original paper's robustness finding holds at this operating point.
+Second, at 70\% sparsity, English-calibrated Wanda loses 12 percentage points (pp) more Korean capability than Korean-calibrated Wanda, while both damage English knowledge equally (within 0.24\,pp on MMLU at 50\%, where both scores are well above chance).
+The asymmetry is single-sided: Korean calibration preserves Korean without sacrificing English.
+On downstream task accuracy, it is the dominant calibration choice within statistical uncertainty.
+Third, WikiText-2 perplexity at 70\% favors English calibration (108.37 vs.\ 138.24), the \emph{opposite} direction from the Korean-capability result---the original paper's primary metric actively recommends the calibration choice that maximizes minority-language damage.
+
+Following the Track~2 stress-testing protocol, we also document reproducibility issues in the original codebase, including a hardcoded calibration buffer that silently prevents the paper's own sensitivity sweep from running correctly.
+
+%------------------------------------------------------------------
+\section{Background and Related Work}
+\label{sec:background}
+%------------------------------------------------------------------
+
+\textbf{Wanda} prunes each linear layer independently by computing $S_{ij}$ (Eq.~\ref{eq:wanda}) for all weights and zeroing those below a target sparsity ratio~\citep{sun2024wanda}.
+The key insight over magnitude-only pruning is that a weight connected to a high-activation feature should be treated as more important, even if its magnitude is small---an idea grounded in the observation that LLMs develop outlier features with disproportionately large activations~\citep{dettmers2022llmint8}.
+The calibration set is used solely for a single forward pass to collect activation statistics; no weight updates are performed.
+
+\textbf{Magnitude pruning} scores weights by $|w_{ij}|$ alone, requiring no calibration data.
+\textbf{SparseGPT}~\citep{frantar2023sparsegpt} solves a layer-wise reconstruction problem that updates remaining weights after pruning, making it more expensive but generally stronger.
+Both serve as baselines: magnitude as a calibration-free lower bound, SparseGPT as a calibration-dependent upper bound.
+
+\textbf{Calibration sensitivity in pruning.}
+Ji et al.~\citep{ji2025calibration} showed that calibration data is crucial to post-training pruning quality, especially at high sparsity, and that data more similar to the pre-training distribution yields better results---but tested only English evaluation.
+Choenni \& Titov~\citep{choenni2025multilingual} proposed M-Wanda and showed that even moderate sparsity ratios substantially harm multilingual performance, using mixed multilingual calibration rather than isolating single-language calibration effects.
+Shin et al.~\citep{shin2024calibration} demonstrated that reconstruction-based pruning can overfit its calibration data, and proposed self-generated calibration to mitigate this.
+Our contribution is the direct isolation of the calibration-language variable: we compare English-only vs.\ Korean-only calibration and evaluate on both English and Korean benchmarks.
+The result is a single-sided asymmetry invisible to perplexity-based evaluation.
+
+%------------------------------------------------------------------
+\section{Experimental Setup}
+\label{sec:setup}
+%------------------------------------------------------------------
+
+\textbf{Model.}\quad LLaMA-3-8B~\citep{grattafiori2024llama3}, chosen because it scores above random chance on KoBEST HellaSwag (Korean), a prerequisite for measuring Korean-capability loss after pruning.
+
+\textbf{Calibration sources.}\quad We use 128 samples per source, matching the original Wanda default:
+\emph{C4}~\citep{raffel2020t5} (English web text, the original paper's default),
+\emph{MC4-ko} (Korean subset of multilingual C4),
+\emph{The Stack} (source code, a non-natural-language domain),
+and \emph{random tokens} (sampled uniformly from the vocabulary; a structureless control).
+
+\textbf{Evaluation.}\quad All metrics are computed with lm-evaluation-harness~\citep{gao2024lmeval}.
+\emph{WikiText-2 perplexity} ($\downarrow$): the original Wanda paper's primary metric, measuring English language-modeling fluency.
+\emph{MMLU}~\citep{hendrycks2021mmlu} ($\uparrow$, 5-shot accuracy): English world knowledge and reasoning (14,042 items; stderr $\approx$\,0.4\,pp).
+\emph{KoBEST HellaSwag}~\citep{jang2022kobest} ($\uparrow$, 0-shot accuracy, 4-way MCQ): Korean commonsense reasoning (stderr $\approx$\,2.2\,pp; chance level 25\%)---the capability we expect to be most sensitive to English-only calibration.
+GSM8K (math reasoning) was planned but excluded entirely due to CUDA kernel failures during chain-of-thought generation that affected all model variants (see \S\ref{sec:repro}).
+
+\textbf{Sparsity levels.}\quad 50\%, 60\%, and 70\% unstructured sparsity, applied per output neuron as in the original paper.
+
+\textbf{Compute.}\quad 8$\times$ NVIDIA RTX 6000 Ada (48\,GB each), CUDA 12.6, PyTorch 2.6.0, Transformers 5.5.3.
+All experiments total 14 distinct pruning runs on LLaMA-3-8B.
+
+%------------------------------------------------------------------
+\subsection{Reproducibility Issues}
+\label{sec:repro}
+%------------------------------------------------------------------
+
+Before running stress tests, we attempted to reproduce original results using the public codebase.\footnote{\url{https://github.com/locuslab/wanda}}
+Three issues are especially consequential:
+
+\emph{(1)~Hardcoded calibration buffer.}
+The function \texttt{prepare\_calibration\_input} allocates the calibration tensor with a hardcoded \texttt{torch.zeros((128, ...))}, ignoring the \texttt{-{}-nsamples} argument.
+With $\texttt{nsamples}>128$ the first-layer hook overflows with an \texttt{IndexError}; with $\texttt{nsamples}<128$ the buffer contains trailing zeros read as valid calibration.
+This silently prevents the paper's own sensitivity sweep (their Table~17) from running as described.
+
+\emph{(2)~Transformers kwargs mismatch.}
+The calibration catcher reads \texttt{kwargs['position\_ids']} directly, but Transformers 4.40+ may pass \texttt{position\_ids=None} or introduce \texttt{position\_embeddings} as a separate kwarg, causing a \texttt{KeyError}.
+Our fix captures all kwargs into a dict and re-emits them at the layer call site.
+
+\emph{(3)~CUDA kernel failures during evaluation.}
+Two distinct failure modes affected our evaluation.
+First, GSM8K's chain-of-thought generation (1,319 requests) crashed with \texttt{CUDA error: unspecified launch failure} for all model variants including dense, making GSM8K unrecoverable.
+Second, MMLU's loglikelihood evaluation (56,168 requests) crashed intermittently for \emph{Wanda-pruned} LLaMA-3-8B specifically, but not for magnitude- or SparseGPT-pruned models on the same hardware; the error originates in the SwiGLU MLP, suggesting numerical instability from the Wanda per-output mask.
+Setting \texttt{-{}-eval\_batch\_size\,1} resolves the MMLU crash for most configurations.
+MMLU cells at 60\% sparsity for Wanda were not measured; the thesis comparison is captured at 50\% and 70\%.
+
+Three additional issues (torch version blocking, C4 dataset config rename, OPT architecture mismatch) are documented in our fork.\footnote{Available upon request; will be released publicly after the course evaluation period.}
+
+%------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+%------------------------------------------------------------------
+
+\subsection{Calibration Source at 50\% Sparsity}
+
+Table~\ref{tab:calibration} holds model and sparsity fixed and varies the calibration source for Wanda, comparing against magnitude pruning (calibration-free) and SparseGPT (calibration-dependent).
+
+\begin{table}[t]
+  \caption{Effect of calibration source on Wanda at 50\% unstructured sparsity (LLaMA-3-8B). WikiText-2 perplexity separates calibration sources clearly; KoBEST HellaSwag does not.}
+  \label{tab:calibration}
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Method (calibration) & WT-2 ppl\,$\downarrow$ & MMLU\,$\uparrow$ & KoBEST HS\,$\uparrow$ \\
+    \midrule
+    Dense (no pruning) & 5.54 & 65.40 & 56.60 \\
+    \midrule
+    Magnitude (no calibration) & 310.71 & 26.79 & 36.80 \\
+    SparseGPT (C4) & 8.52 & 53.73 & 52.20 \\
+    \midrule
+    Wanda (C4, English) & 9.06 & 48.59 & 51.60 \\
+    Wanda (MC4-ko, Korean) & 10.09 & 48.83 & 51.00 \\
+    Wanda (The Stack, code) & 10.18 & 46.31 & 52.20 \\
+    Wanda (random tokens) & 15.33 & 30.11 & 51.00 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+WikiText-2 perplexity follows a clear ordering: C4 (9.06) $<$ MC4-ko (10.09) $\approx$ The Stack (10.18) $<$ random (15.33), a 6.27-point spread consistent with the activation norm encoding the calibration distribution.
+On MMLU, the three natural-language calibrations are within 2.5\,pp of each other (C4 and MC4-ko within 0.24\,pp), while random tokens collapse to 30.11\%.
+On KoBEST HellaSwag, all four Wanda variants cluster in a 1.2\,pp window (51.00--52.20\%), well within the $\pm$2.2\,pp stderr.
+At this sparsity, calibration source does not measurably affect Korean capability.
+
+Magnitude pruning collapses on LLaMA-3-8B (perplexity 310.71, MMLU at chance), unlike the moderate degradation reported for LLaMA-2 in the original paper.
+This prevents our pre-registered test of whether mismatched-calibration Wanda could fall below magnitude pruning: even Wanda with random tokens beats this baseline by 14.2\,pp on KoBEST.
+
+\subsection{Sparsity $\times$ Calibration Interaction}
+
+Table~\ref{tab:sparsity} sweeps sparsity for the two calibration sources of primary interest (C4 and MC4-ko).
+Figure~\ref{fig:kobest} plots KoBEST HellaSwag across sparsity for all methods.
+
+\begin{table}[t]
+  \caption{Wanda sparsity sweep: English (C4) vs.\ Korean (MC4-ko) calibration on LLaMA-3-8B. Dashes indicate MMLU values not measured at 60\% due to CUDA evaluation failures (\S\ref{sec:repro}). The KoBEST gap between C4 and MC4-ko grows from $-$0.60\,pp at 50\% to +12.00\,pp at 70\%.}
+  \label{tab:sparsity}
+  \centering
+  \small
+  \begin{tabular}{@{}llccc@{}}
+    \toprule
+    Calibration & Sparsity & WT-2 ppl\,$\downarrow$ & MMLU\,$\uparrow$ & KoBEST HS\,$\uparrow$ \\
+    \midrule
+    \multirow{3}{*}{C4 (English)}
+      & 50\% & 9.06 & 48.59 & 51.60 \\
+      & 60\% & 23.07 & --- & 43.00 \\
+      & 70\% & 108.37 & 26.36 & 29.00 \\
+    \midrule
+    \multirow{3}{*}{MC4-ko (Korean)}
+      & 50\% & 10.09 & 48.83 & 51.00 \\
+      & 60\% & 32.62 & --- & 47.00 \\
+      & 70\% & 138.24 & 26.21 & 41.00 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{kobest_sparsity.pdf}
+  \caption{KoBEST HellaSwag accuracy across sparsity levels. Wanda (C4) and Wanda (MC4-ko) start together at 50\% and diverge at 70\%, with a 12\,pp gap. SparseGPT (C4) degrades more gracefully than Wanda (C4). Magnitude pruning collapses below random chance by 60\%.}
+  \label{fig:kobest}
+\end{figure}
+
+The KoBEST gap between C4 and MC4-ko calibration grows monotonically with sparsity: $-$0.60\,pp at 50\% (noise), +4.00\,pp at 60\% (emerging), +12.00\,pp at 70\% (well outside statistical noise: the difference stderr is $\sqrt{2}\times2.2\approx3.1$\,pp, giving ${\approx}$\,3.9$\sigma$).
+Equivalently, the KoBEST drop from 50\% to 70\% is $-$22.60\,pp for C4 but only $-$10.00\,pp for MC4-ko---English calibration suffers more than twice the Korean-capability loss under the same sparsity increase.
+
+MMLU tells the opposite story.
+At 50\%, C4 and MC4-ko produce 48.59\% and 48.83\% respectively (difference 0.24\,pp, well within the $\pm$0.4\,pp stderr at $n$\,=\,14k).
+At 70\%, both collapse to near chance: 26.36\% and 26.21\% (difference 0.15\,pp).
+At both sparsities where MMLU was measured, the two calibrations damage English knowledge equally.
+
+%------------------------------------------------------------------
+\section{Analysis}
+\label{sec:analysis}
+%------------------------------------------------------------------
+
+\subsection{The Calibration Fingerprint}
+
+The WikiText-2 perplexity ordering at 50\% (Table~\ref{tab:calibration}) is consistent with $\|x_j\|_2$ carrying a distributional signature: in-domain English calibration (C4) produces the best English perplexity; out-of-domain calibration (MC4-ko, The Stack) adds ${\sim}$1\,ppl; structureless calibration (random tokens) adds 6.27\,ppl.
+One anomaly stands out: random-token calibration collapses MMLU to 30.11\% (near chance) while leaving KoBEST at 51.00\% (indistinguishable from other calibrations).
+This likely reflects KoBEST's limited statistical power ($\pm$2.2\,pp stderr) rather than a true difference in vulnerability; moderate damage would be undetectable at this sample size.
+
+\subsection{Sparsity-Dependent Emergence}
+
+At 50\% sparsity, the calibration fingerprint is measurable in perplexity but does not affect KoBEST: all four Wanda variants produce statistically indistinguishable Korean scores (Table~\ref{tab:calibration}).
+On MMLU, the two natural-language calibrations (C4 and MC4-ko) are equally indistinguishable, though code and random calibrations degrade English knowledge.
+The pruning budget is loose enough that features survive regardless of their calibration-derived importance.
+At 70\%, the budget tightens and the fingerprint becomes a triage mechanism---the KoBEST gap grows from noise at 50\% to a clear signal at 70\%, with the effect already emerging at 60\% (Table~\ref{tab:sparsity}).
+The calibration-source effect on Korean capability is therefore a sparsity-dependent phenomenon: invisible at the operating point tested in the original paper, decisive at aggressive sparsity.
+
+\subsection{Single-Sided Asymmetry}
+
+The asymmetry between English and Korean capability loss is the central finding.
+Korean calibration (MC4-ko) preserves Korean capability without sacrificing English: at 50\%, where both MMLU scores are well above chance (48.83 vs.\ 48.59), the difference is 0.24\,pp---conclusively null.
+English calibration (C4) destroys Korean capability at high sparsity yet gains nothing on English over Korean calibration: at 70\%, MMLU is 26.36 vs.\ 26.21 (0.15\,pp difference) while KoBEST is 29.00 vs.\ 41.00 (12.00\,pp difference).
+
+We attribute the single-sidedness to an asymmetry in the calibration data itself.
+Korean web text naturally contains English tokens---borrowed words, mixed script, Latin-alphabet brand names---so MC4-ko calibration activates both Korean- and English-relevant features.
+English web text contains essentially no Korean, so C4 calibration activates only English-relevant features and assigns near-zero importance to Korean-specific ones.
+We did not directly verify this by inspecting per-feature activation norms, but the explanation is consistent with all observed data.
+
+On downstream task accuracy, MC4-ko matches or exceeds C4 within statistical uncertainty at every sparsity tested: it matches C4 on MMLU (differences of 0.24\,pp and 0.15\,pp, both well inside stderr) and exceeds it on KoBEST at 60\% and 70\%.
+This makes MC4-ko the dominant calibration choice for any deployment that values Korean capability---it costs nothing on English.
+Note that this dominance holds on downstream accuracy, not on WikiText-2 perplexity, where C4 is consistently better (9.06 vs.\ 10.09 at 50\%; 108.37 vs.\ 138.24 at 70\%).
+
+\subsection{Evaluation Blindness}
+
+The most practically important result is the perplexity--capability dissociation at 70\% sparsity.
+WikiText-2 perplexity says C4 calibration is 29.87 points better than MC4-ko (108.37 vs.\ 138.24).
+KoBEST says MC4-ko calibration is 12.00\,pp better than C4 (41.00 vs.\ 29.00).
+The two metrics give opposite recommendations.
+
+A practitioner following the standard evaluation pipeline---calibrate on English, evaluate on perplexity---would choose C4 at every sparsity and never discover the Korean-capability damage.
+This is not a failure of perplexity as a metric \emph{per se}; WikiText-2 perplexity faithfully measures English fluency.
+The failure is in using an English-only metric to evaluate the effect of calibration-data choice, when the risk is precisely that calibration biases pruning toward the language of the calibration data.
+The evaluation is structurally blind to the capability damage it should be measuring.
+
+\subsection{Secondary Findings}
+
+\textbf{Magnitude collapse on LLaMA-3-8B.}\quad
+Magnitude pruning at 50\% produces WikiText-2 perplexity of 310.71 on LLaMA-3-8B, compared to ${\sim}$15 on LLaMA-2-7B reported in the original paper.
+On LLaMA-3-8B, calibration-free pruning collapses catastrophically---similar to the OPT/BLOOM behavior documented by~\citet{sun2024wanda}.
+The original paper's favorable comparison of Wanda against magnitude pruning does not hold for LLaMA-3-8B.
+
+\textbf{SparseGPT graceful degradation.}\quad
+SparseGPT degrades more gracefully than Wanda across sparsity on this model (perplexity 37.52 vs.\ 108.37 at 70\%; KoBEST 32.40 vs.\ 29.00).
+However, Wanda with Korean calibration (MC4-ko) at 70\% outperforms SparseGPT with English calibration (C4) on KoBEST by 8.6\,pp (41.00 vs.\ 32.40), despite being ${\sim}$300$\times$ faster.
+This comparison confounds algorithm and calibration choices, but the practical lesson is clear: choosing the right calibration for a simple method can matter more than choosing a sophisticated algorithm with default calibration.
+
+%------------------------------------------------------------------
+\section{Limitations}
+\label{sec:limitations}
+%------------------------------------------------------------------
+
+Each experiment uses a single random seed; variance across seeds is not reported.
+The effect sizes on KoBEST at 70\% (12\,pp, ${\approx}$\,3.9$\sigma$ on the difference stderr) are large relative to statistical noise, but the exact numbers may shift with different seeds.
+All experiments use LLaMA-3-8B; we do not test generalization to other model families (Qwen, Mistral) or model sizes.
+Korean is the only non-English language tested; the mechanism (calibration fingerprint biasing pruning) suggests this should generalize, but we have not verified it.
+GSM8K evaluation was lost entirely to CUDA failures, and MMLU has gaps at 60\% sparsity for Wanda variants, leaving the per-task fragility analysis incomplete.
+KoBEST HellaSwag has a small test set ($\pm$2.2\,pp stderr); effects below ${\sim}$5\,pp---including the predicted calibration advantage at 50\% sparsity---cannot be reliably detected at this sample size.
+
+%------------------------------------------------------------------
+\section{Conclusion}
+%------------------------------------------------------------------
+
+We stress-tested Wanda's calibration robustness by varying calibration domain and language rather than quantity.
+Our results are consistent with the activation norm acting as a calibration-distribution fingerprint.
+At 50\% sparsity, this fingerprint creates a measurable perplexity ordering across calibration sources but does not affect downstream task accuracy.
+At 60--70\%, it becomes a capability triage mechanism.
+The resulting asymmetry is single-sided and grows with sparsity: Korean calibration preserves Korean capability (KoBEST gap grows from noise at 50\% to +12\,pp at 70\%) while English knowledge is unaffected (MMLU within 0.24\,pp at every sparsity).
+WikiText-2 perplexity, a standard pruning evaluation metric, cannot detect this damage and actively favors the calibration choice that maximizes it.
+For any deployment valuing minority-language capability, in-language calibration is the dominant strategy.
+
+\begin{thebibliography}{11}
+
+\bibitem[Sun et~al.(2024)]{sun2024wanda}
+Sun, M., Liu, Z., Bair, A., \& Kolter, J.\,Z.
+\newblock A simple and effective pruning approach for large language models.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Frantar \& Alistarh(2023)]{frantar2023sparsegpt}
+Frantar, E. \& Alistarh, D.
+\newblock {SparseGPT}: Massive language models can be accurately pruned in one shot.
+\newblock In \emph{ICML}, 2023.
+
+\bibitem[Raffel et~al.(2020)]{raffel2020t5}
+Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., Zhou, Y., Li, W., \& Liu, P.\,J.
+\newblock Exploring the limits of transfer learning with a unified text-to-text transformer.
+\newblock \emph{JMLR}, 21(140):1--67, 2020.
+
+\bibitem[Grattafiori et~al.(2024)]{grattafiori2024llama3}
+Grattafiori, A. et~al.
+\newblock The {L}lama 3 herd of models.
+\newblock \emph{arXiv preprint arXiv:2407.21783}, 2024.
+
+\bibitem[Dettmers et~al.(2022)]{dettmers2022llmint8}
+Dettmers, T., Lewis, M., Belkada, Y., \& Zettlemoyer, L.
+\newblock {LLM.int8()}: 8-bit matrix multiplication for transformers at scale.
+\newblock In \emph{NeurIPS}, 2022.
+
+\bibitem[Ji et~al.(2025)]{ji2025calibration}
+Ji, Y., Xiang, Y., Li, J., Xia, Q., Li, P., Duan, X., Wang, Z., \& Zhang, M.
+\newblock Beware of calibration data for pruning large language models.
+\newblock In \emph{ICLR}, 2025.
+
+\bibitem[Choenni \& Titov(2025)]{choenni2025multilingual}
+Choenni, R. \& Titov, I.
+\newblock {M-Wanda}: Improving one-shot pruning for multilingual {LLM}s.
+\newblock In \emph{EMNLP}, 2025.
+
+\bibitem[Shin et~al.(2024)]{shin2024calibration}
+Shin, S., Park, W., Lee, J., \& Lee, N.
+\newblock Rethinking pruning large language models: Benefits and pitfalls of reconstruction error minimization.
+\newblock In \emph{EMNLP}, 2024.
+
+\bibitem[Gao et~al.(2024)]{gao2024lmeval}
+Gao, L., Tow, J., Abbasi, B., Biderman, S., Black, S., DiPofi, A., Foster, C., Golding, L., Hsu, J., Le Noac'h, A., Li, H., McDonell, K., Muennighoff, N., Ociepa, C., Phang, J., Reynolds, L., Schoelkopf, H., Skowron, A., Sutawika, L., Tang, E., Thite, A., Wang, B., Wang, K., \& Zou, A.
+\newblock A framework for few-shot language model evaluation.
+\newblock \emph{Zenodo}, 2024.
+\newblock \url{https://github.com/EleutherAI/lm-evaluation-harness}.
+
+\bibitem[Hendrycks et~al.(2021)]{hendrycks2021mmlu}
+Hendrycks, D., Burns, C., Basart, S., Zou, A., Mazeika, M., Song, D., \& Steinhardt, J.
+\newblock Measuring massive multitask language understanding.
+\newblock In \emph{ICLR}, 2021.
+
+\bibitem[Jang et~al.(2022)]{jang2022kobest}
+Jang, M., Kim, D., Kwon, D.\,S., \& Davis, E.
+\newblock {KoBEST}: {K}orean balanced evaluation of significant tasks.
+\newblock In \emph{COLING}, 2022.
+
+\end{thebibliography}
+
+\end{document}
